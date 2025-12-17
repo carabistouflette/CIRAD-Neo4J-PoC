@@ -21,11 +21,14 @@ export function StatsGrid() {
     ];
 
     return (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+        <div className="flex flex-row flex-wrap gap-4 pointer-events-auto">
             {items.map((item) => (
-                <div key={item.label} className={`${item.color} p-4 border-3 border-neo-black shadow-neo-sm hover:translate-x-1 hover:translate-y-1 hover:shadow-none transition-all cursor-crosshair`}>
-                    <div className="text-3xl font-black text-neo-black">{item.value}</div>
-                    <div className="text-sm font-bold uppercase tracking-widest mt-1 border-t-2 border-neo-black pt-1">{item.label}</div>
+                <div key={item.label} className="bg-neo-white px-4 py-2 border-3 border-neo-black shadow-neo-sm flex items-center gap-3 hover:-translate-y-1 hover:shadow-neo transition-all">
+                    <div className={`w-3 h-3 ${item.color} border-2 border-neo-black`}></div>
+                    <div className="flex flex-col leading-none">
+                        <span className="text-xl font-black text-neo-black">{item.value}</span>
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-neo-black/60">{item.label}</span>
+                    </div>
                 </div>
             ))}
         </div>

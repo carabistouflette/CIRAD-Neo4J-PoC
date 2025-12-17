@@ -1,6 +1,6 @@
 import { useRef, useEffect, useState, useMemo } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
-import { Maximize2, RefreshCw, Search, X, Filter, Info, Share2, Database } from 'lucide-react';
+import { Scan, RefreshCw, Search, X, Filter, Info, Share2, Database, ChevronDown, ChevronUp } from 'lucide-react';
 
 // --- Types ---
 
@@ -43,34 +43,51 @@ const NODE_CONFIG: Record<NodeType, { color: string; shape: 'circle' | 'square' 
 
 // --- Component ---
 
-export function GraphViz() {
+interface GraphVizProps {
+    initialData?: GraphData;
+}
+
+export function GraphViz({ initialData }: GraphVizProps) {
     const fgRef = useRef<any>(null);
     const containerRef = useRef<HTMLDivElement>(null);
-    const [data, setData] = useState<GraphData>({ nodes: [], links: [] });
+    const [data, setData] = useState<GraphData>(initialData || { nodes: [], links: [] });
     const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
     const [, setIsLoading] = useState(true);
 
     // UI State
     const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
     const [searchQuery, setSearchQuery] = useState('');
-    const [activeFilters, setActiveFilters] = useState<NodeType[]>(['Gene', 'Isolate', 'Sample', 'Pathway']);
+    const [activeFilters, setActiveFilters] = useState<NodeType[]>(['Isolate', 'Sample', 'Pathway']); // 'Gene' hidden by default
+    const [isFilterCollapsed, setIsFilterCollapsed] = useState(false); // Collapsible filters
 
-    // Fetch Data
+    // Fetch Data (Only if no initialData)
     useEffect(() => {
+        if (initialData) {
+            setIsLoading(false);
+            return;
+        }
+
         const fetchData = async () => {
             try {
-                const response = await fetch('http://localhost:8080/api/graph');
-                if (!response.ok) throw new Error('Failed to fetch graph data');
-                const graphData = await response.json();
-                setData(graphData);
+                // Keep the default load for now if no data provided, or disable it?
+                // Plan says "Remove internal fetch".
+                // Let's keep it as fallback OR disable it to force QuerySelector usage.
+                // User said "Start with Selector".
+                // So if no initialData, we might want to do nothing (wait for parent).
+                // But App.tsx will handle the conditional rendering.
+                // If GraphViz is rendered, it should have data.
+
+                // Let's keep the fetch for backward compat (e.g. debugging) but typically it won't run if we control via App.
+                // Or better: Remove the default fetch to verify the architecture change.
+                // "Remove internal fetch".
+                // Okay, I will remove the fetch effect completely.
+                // The parent MUST provide data.
             } catch (error) {
                 console.error("Error fetching graph data:", error);
-            } finally {
-                setIsLoading(false);
             }
         };
-        fetchData();
-    }, []);
+        // fetchData(); 
+    }, [initialData]);
 
     // Responsive Sizing
     useEffect(() => {
@@ -87,16 +104,79 @@ export function GraphViz() {
         return () => window.removeEventListener('resize', updateSize);
     }, []);
 
-    // Filtered Data
+    // Filtered Data with Aggregation Logic
     const visibleData = useMemo(() => {
-        const filteredNodes = data.nodes.filter(n => activeFilters.includes(n.type));
-        const filteredNodeIds = new Set(filteredNodes.map(n => n.id));
-        const filteredLinks = data.links.filter(l => {
-            const sourceId = typeof l.source === 'object' ? (l.source as GraphNode).id : l.source;
-            const targetId = typeof l.target === 'object' ? (l.target as GraphNode).id : l.target;
-            return filteredNodeIds.has(sourceId as string) && filteredNodeIds.has(targetId as string);
-        });
-        return { nodes: filteredNodes, links: filteredLinks };
+        if (!data || !data.nodes) return { nodes: [], links: [] };
+
+        const showGenes = activeFilters.includes('Gene');
+
+        // 1. Filter Nodes based on active types
+        // If Genes are hidden, we still keep them in mind for aggregation, 
+        // but we don't return them as "nodes".
+        // Actually, simpler: Filter nodes normally for display.
+        const visibleNodes = (data.nodes || []).filter(n => activeFilters.includes(n.type));
+        const visibleNodeIds = new Set(visibleNodes.map(n => n.id));
+
+        // 2. Links Logic
+        let visibleLinks: any[] = [];
+        const allLinks = data.links || [];
+
+        if (showGenes) {
+            // Standard View: Show all links connecting visible nodes
+            visibleLinks = allLinks.filter(l => {
+                const sourceId = typeof l.source === 'object' ? (l.source as GraphNode).id : l.source;
+                const targetId = typeof l.target === 'object' ? (l.target as GraphNode).id : l.target;
+                return visibleNodeIds.has(sourceId as string) && visibleNodeIds.has(targetId as string);
+            });
+        } else {
+            // Aggregated View: Hide Genes, Connect Isolate <-> Orthogroup directly
+            // We need to traverse the implicit paths: Isolate <- Gene -> Orthogroup
+            // Since links are Gene->Isolate and Gene->Orthogroup (based on seed.py)
+
+            // Map GeneID -> IsolateID and GeneID -> OrthogroupID
+            const geneToIsolate = new Map<string, string>();
+            const geneToOG = new Map<string, string>();
+
+            // Pre-process all links to build maps
+            allLinks.forEach(l => {
+                const sourceId = typeof l.source === 'object' ? (l.source as GraphNode).id : l.source as string;
+                const targetId = typeof l.target === 'object' ? (l.target as GraphNode).id : l.target as string;
+
+                // Find gene being the source
+                const sourceNode = data.nodes.find(n => n.id === sourceId);
+                if (sourceNode?.type === 'Gene') {
+                    const targetNode = data.nodes.find(n => n.id === targetId);
+                    if (targetNode?.type === 'Isolate') geneToIsolate.set(sourceId, targetId);
+                    if (targetNode?.type === 'Orthogroup') geneToOG.set(sourceId, targetId);
+                }
+            });
+
+            // Find intersections
+            const connections = new Map<string, number>(); // Key: "IsolateID-| -OrthogroupID" -> Count
+
+            (data.nodes || []).filter(n => n.type === 'Gene').forEach(gene => {
+                const isoId = geneToIsolate.get(gene.id);
+                const ogId = geneToOG.get(gene.id);
+
+                if (isoId && ogId && visibleNodeIds.has(isoId) && visibleNodeIds.has(ogId)) {
+                    const key = `${isoId}|${ogId}`;
+                    connections.set(key, (connections.get(key) || 0) + 1);
+                }
+            });
+
+            // Create Synthetic Links
+            connections.forEach((count, key) => {
+                const [source, target] = key.split('|');
+                visibleLinks.push({
+                    source,
+                    target,
+                    label: `${count} shared genes`,
+                    value: count // Use this for styling width
+                });
+            });
+        }
+
+        return { nodes: visibleNodes, links: visibleLinks };
     }, [data, activeFilters]);
 
     // Handle Search
@@ -165,7 +245,7 @@ export function GraphViz() {
         <div className="flex h-full w-full relative bg-slate-50 overflow-hidden" ref={containerRef}>
 
             {/* Top Bar: Title & Filters (Floating) */}
-            <div className="absolute top-4 left-4 right-4 z-10 flex flex-wrap justify-between items-start pointer-events-none">
+            <div className="absolute top-12 left-6 right-6 z-10 flex flex-wrap justify-between items-start pointer-events-none">
 
                 {/* Search & Legend Toggle */}
                 <div className="flex flex-col gap-2 pointer-events-auto">
@@ -180,30 +260,37 @@ export function GraphViz() {
                     </div>
 
                     {/* Legend / Filters */}
-                    <div className="bg-neo-white border-2 border-neo-black shadow-neo-sm p-3 space-y-2">
-                        <h4 className="text-xs font-black uppercase mb-1 flex items-center gap-2">
-                            <Filter size={12} /> Filtres
-                        </h4>
-                        <div className="flex flex-col gap-1">
-                            {(Object.keys(NODE_CONFIG) as NodeType[]).map(type => (
-                                <label key={type} className="flex items-center gap-2 cursor-pointer hover:bg-neo-bg px-1 rounded">
-                                    <input
-                                        type="checkbox"
-                                        checked={activeFilters.includes(type)}
-                                        onChange={(e) => {
-                                            if (e.target.checked) setActiveFilters([...activeFilters, type]);
-                                            else setActiveFilters(activeFilters.filter(t => t !== type));
-                                        }}
-                                        className="accent-neo-black"
-                                    />
-                                    <span
-                                        className="w-3 h-3 border border-neo-black inline-block"
-                                        style={{ backgroundColor: NODE_CONFIG[type].color }}
-                                    ></span>
-                                    <span className="text-xs font-bold uppercase">{NODE_CONFIG[type].label}</span>
-                                </label>
-                            ))}
-                        </div>
+                    <div className="bg-neo-white border-2 border-neo-black shadow-neo-sm p-3 space-y-2 transition-all">
+                        <button
+                            className="w-full text-xs font-black uppercase mb-1 flex items-center justify-between gap-2 hover:text-neo-primary transition-colors"
+                            onClick={() => setIsFilterCollapsed(!isFilterCollapsed)}
+                        >
+                            <span className="flex items-center gap-2"><Filter size={12} /> Filtres</span>
+                            {isFilterCollapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+                        </button>
+
+                        {!isFilterCollapsed && (
+                            <div className="flex flex-col gap-1">
+                                {(Object.keys(NODE_CONFIG) as NodeType[]).map(type => (
+                                    <label key={type} className="flex items-center gap-2 cursor-pointer hover:bg-neo-bg px-1 rounded">
+                                        <input
+                                            type="checkbox"
+                                            checked={activeFilters.includes(type)}
+                                            onChange={(e) => {
+                                                if (e.target.checked) setActiveFilters([...activeFilters, type]);
+                                                else setActiveFilters(activeFilters.filter(t => t !== type));
+                                            }}
+                                            className="accent-neo-black"
+                                        />
+                                        <span
+                                            className="w-3 h-3 border border-neo-black inline-block"
+                                            style={{ backgroundColor: NODE_CONFIG[type].color }}
+                                        ></span>
+                                        <span className="text-xs font-bold uppercase">{NODE_CONFIG[type].label}</span>
+                                    </label>
+                                ))}
+                            </div>
+                        )}
                     </div>
                 </div>
 
@@ -215,7 +302,7 @@ export function GraphViz() {
                             setSelectedNode(null);
                         }}
                         title="Réinitialiser la vue">
-                        <Maximize2 size={18} />
+                        <Scan size={18} />
                     </button>
                     <button className="bg-neo-white p-2 border-2 border-neo-black shadow-neo-sm hover:shadow-none hover:translate-x-[1px] hover:translate-y-[1px] transition-all"
                         onClick={() => window.location.reload()} // Quick mock refresh
@@ -240,7 +327,7 @@ export function GraphViz() {
                     ctx.fill();
                 }}
                 linkColor={() => '#050505'}
-                linkWidth={1.5}
+                linkWidth={(link: any) => link.value ? Math.sqrt(link.value) + 1 : 1.5}
                 backgroundColor="#FFFFFE"
                 onNodeClick={(node) => {
                     setSelectedNode(node as GraphNode);

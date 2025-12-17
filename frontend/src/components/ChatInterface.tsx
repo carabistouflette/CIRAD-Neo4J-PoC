@@ -1,5 +1,6 @@
+
 import { useState, useRef, useEffect } from 'react';
-import { Send, Bot, User, Sparkles, Trash2 } from 'lucide-react';
+import { Send, Bot, User, Sparkles, Trash2, Minus, Maximize2, Move } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 
 interface Message {
@@ -15,13 +16,114 @@ export function ChatInterface() {
     const [isLoading, setIsLoading] = useState(false);
     const messagesEndRef = useRef<HTMLDivElement>(null);
 
+    // Window State
+    const [isOpen, setIsOpen] = useState(true);
+    const [isMinimized, setIsMinimized] = useState(true);
+    const [size, setSize] = useState({ width: 400, height: 600 });
+    const [position, setPosition] = useState({ x: window.innerWidth - 420, y: 100 });
+
+    // Drag/Resize State
+    const [isDragging, setIsDragging] = useState(false);
+    const [isResizing, setIsResizing] = useState(false);
+    const dragOffset = useRef({ x: 0, y: 0 });
+    const resizeStart = useRef({ x: 0, y: 0, w: 0, h: 0, lx: 0, ly: 0 }); // lx, ly = layout x, y
+    const resizeDir = useRef<string>('');
+
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
     };
 
     useEffect(() => {
-        scrollToBottom();
-    }, [messages, isLoading]);
+        if (isOpen && !isMinimized) {
+            scrollToBottom();
+        }
+    }, [messages, isLoading, isOpen, isMinimized, size]);
+
+    // Drag Logic (Header)
+    const handleMouseDown = (e: React.MouseEvent) => {
+        if (isMinimized) return;
+        setIsDragging(true);
+        dragOffset.current = {
+            x: e.clientX - position.x,
+            y: e.clientY - position.y
+        };
+    };
+
+    // Resize Logic
+    const handleResizeMouseDown = (e: React.MouseEvent, dir: string) => {
+        e.stopPropagation();
+        setIsResizing(true);
+        resizeDir.current = dir;
+        resizeStart.current = {
+            x: e.clientX,
+            y: e.clientY,
+            w: size.width,
+            h: size.height,
+            lx: position.x,
+            ly: position.y
+        };
+    };
+
+    useEffect(() => {
+        const handleMouseMove = (e: MouseEvent) => {
+            if (isDragging) {
+                setPosition({
+                    x: e.clientX - dragOffset.current.x,
+                    y: e.clientY - dragOffset.current.y
+                });
+            }
+            if (isResizing) {
+                const deltaX = e.clientX - resizeStart.current.x;
+                const deltaY = e.clientY - resizeStart.current.y;
+                const dir = resizeDir.current;
+
+                let newWidth = resizeStart.current.w;
+                let newHeight = resizeStart.current.h;
+                let newX = resizeStart.current.lx;
+                let newY = resizeStart.current.ly;
+
+                // Horizontal Resize
+                if (dir.includes('e')) {
+                    newWidth = Math.max(300, resizeStart.current.w + deltaX);
+                } else if (dir.includes('w')) {
+                    const proposedWidth = resizeStart.current.w - deltaX;
+                    if (proposedWidth >= 300) {
+                        newWidth = proposedWidth;
+                        newX = resizeStart.current.lx + deltaX;
+                    }
+                }
+
+                // Vertical Resize
+                if (dir.includes('s')) {
+                    newHeight = Math.max(400, resizeStart.current.h + deltaY);
+                } else if (dir.includes('n')) {
+                    const proposedHeight = resizeStart.current.h - deltaY;
+                    if (proposedHeight >= 400) {
+                        newHeight = proposedHeight;
+                        newY = resizeStart.current.ly + deltaY;
+                    }
+                }
+
+                setSize({ width: newWidth, height: newHeight });
+                setPosition({ x: newX, y: newY });
+            }
+        };
+        const handleMouseUp = () => {
+            setIsDragging(false);
+            setIsResizing(false);
+        };
+
+        if (isDragging || isResizing) {
+            window.addEventListener('mousemove', handleMouseMove);
+            window.addEventListener('mouseup', handleMouseUp);
+            document.body.style.userSelect = 'none'; // Prevent text selection
+        }
+        return () => {
+            window.removeEventListener('mousemove', handleMouseMove);
+            window.removeEventListener('mouseup', handleMouseUp);
+            document.body.style.userSelect = ''; // Re-enable text selection
+        };
+    }, [isDragging, isResizing]);
 
     const clearChat = () => {
         setMessages([
@@ -38,7 +140,6 @@ export function ChatInterface() {
         setIsLoading(true);
 
         try {
-            // Connect to Backend API
             const response = await fetch('http://localhost:8080/api/chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -59,46 +160,98 @@ export function ChatInterface() {
         }
     };
 
-    return (
-        <div className="flex flex-col h-full lg:h-[700px] bg-neo-white border-3 border-neo-black shadow-neo overflow-hidden relative">
+    // Minimized View (Floating Icon)
+    if (isMinimized || !isOpen) {
+        return (
+            <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-2 pointer-events-auto">
+                {!isOpen && (
+                    <button
+                        onClick={() => setIsOpen(true)}
+                        className="w-14 h-14 bg-neo-accent border-3 border-neo-black shadow-neo rounded-full flex items-center justify-center hover:scale-110 hover:rotate-3 transition-transform animate-bounce-slow"
+                    >
+                        <Sparkles size={24} className="text-neo-black" />
+                    </button>
+                )}
 
-            {/* Header */}
-            <div className="bg-neo-accent p-4 border-b-3 border-neo-black flex items-center justify-between z-10">
-                <div className="flex items-center gap-3">
-                    <div className="p-2 bg-neo-black text-neo-accent border-2 border-neo-black shadow-neo-sm">
-                        <Sparkles className="w-5 h-5" />
+                {isOpen && isMinimized && (
+                    <div
+                        className="bg-neo-white border-3 border-neo-black shadow-neo p-2 flex items-center gap-3 cursor-pointer hover:bg-neo-bg transition-colors"
+                        onClick={() => setIsMinimized(false)}
+                    >
+                        <div className="p-1 bg-neo-black text-neo-accent">
+                            <Bot size={18} />
+                        </div>
+                        <span className="font-bold text-sm uppercase">Assistant IA</span>
+                        <Maximize2 size={16} />
+                    </div>
+                )}
+            </div>
+        );
+    }
+
+    // Full Window View
+    return (
+        <div
+            style={{
+                left: `${position.x}px`,
+                top: `${position.y}px`,
+                width: `${size.width}px`,
+                height: `${size.height}px`,
+                position: 'fixed'
+            }}
+            className={`flex flex-col bg-neo-white border-3 border-neo-black shadow-neo-xl z-50 transition-shadow duration-75 ${isDragging || isResizing ? 'shadow-none' : ''}`}
+        >
+            {/* Header (Draggable) */}
+            <div
+                onMouseDown={handleMouseDown}
+                className={`bg-neo-accent p-3 border-b-3 border-neo-black flex items-center justify-between cursor-grab active:cursor-grabbing hover:bg-neo-accent/90 transition-colors select-none`}
+            >
+                <div className="flex items-center gap-2 pointer-events-none">
+                    <div className="p-1.5 bg-neo-black text-neo-accent border-2 border-neo-black shadow-neo-sm">
+                        <Sparkles className="w-4 h-4" />
                     </div>
                     <div>
-                        <h2 className="font-black text-neo-black uppercase tracking-tight">Assistant IA</h2>
-                        <p className="text-xs font-bold text-neo-black/70">Propulsé par Neo4j + RAG</p>
+                        <h2 className="font-black text-sm text-neo-black uppercase tracking-tight flex items-center gap-2">
+                            Assistant IA <Move size={12} className="opacity-50" />
+                        </h2>
                     </div>
                 </div>
-                <button
-                    onClick={clearChat}
-                    className="p-2 bg-neo-white border-2 border-neo-black shadow-neo-sm hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-none transition-all active:bg-neo-primary active:text-white"
-                    title="Effacer la discussion"
-                >
-                    <Trash2 size={18} />
-                </button>
+                <div className="flex items-center gap-1" onMouseDown={e => e.stopPropagation()}>
+                    <button
+                        onClick={() => setIsMinimized(true)}
+                        className="p-1 hover:bg-neo-black hover:text-white transition-colors border-2 border-transparent hover:border-neo-black"
+                        title="Réduire"
+                    >
+                        <Minus size={16} />
+                    </button>
+                    {/* Expand button removed as requested */}
+                    <button
+                        onClick={clearChat}
+                        className="p-1 hover:bg-neo-black hover:text-white transition-colors border-2 border-transparent hover:border-neo-black"
+                        title="Effacer"
+                    >
+                        <Trash2 size={16} />
+                    </button>
+                </div>
             </div>
 
             {/* Messages Area */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-6 bg-neo-bg">
+            <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-neo-bg">
                 {messages.map((msg, idx) => (
-                    <div key={idx} className={`flex gap-3 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
-                        <div className={`w-10 h-10 border-2 border-neo-black shadow-neo-sm flex items-center justify-center shrink-0 
+                    <div key={idx} className={`flex gap-2 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
+                        <div className={`w-8 h-8 border-2 border-neo-black shadow-neo-sm flex items-center justify-center shrink-0 
                             ${msg.role === 'assistant'
                                 ? 'bg-neo-secondary text-neo-black'
                                 : 'bg-neo-primary text-neo-white'
                             }`}>
-                            {msg.role === 'assistant' ? <Bot size={20} /> : <User size={20} />}
+                            {msg.role === 'assistant' ? <Bot size={16} /> : <User size={16} />}
                         </div>
 
-                        <div className={`max-w-[85%] px-4 py-3 text-sm font-medium border-2 border-neo-black shadow-neo-sm
-              ${msg.role === 'assistant'
+                        <div className={`max-w-[85%] px-3 py-2 text-sm font-medium border-2 border-neo-black shadow-neo-sm
+                            ${msg.role === 'assistant'
                                 ? 'bg-neo-white text-neo-black'
                                 : 'bg-neo-black text-neo-white'}`}>
-                            <div className="prose prose-sm max-w-none">
+                            <div className="prose prose-xs max-w-none">
                                 <ReactMarkdown>{msg.content}</ReactMarkdown>
                             </div>
                         </div>
@@ -106,15 +259,15 @@ export function ChatInterface() {
                 ))}
 
                 {isLoading && (
-                    <div className="flex gap-3">
-                        <div className="w-10 h-10 border-2 border-neo-black shadow-neo-sm bg-neo-secondary text-neo-black flex items-center justify-center shrink-0">
-                            <Bot size={20} />
+                    <div className="flex gap-2">
+                        <div className="w-8 h-8 border-2 border-neo-black shadow-neo-sm bg-neo-secondary text-neo-black flex items-center justify-center shrink-0">
+                            <Bot size={16} />
                         </div>
-                        <div className="bg-neo-white px-4 py-3 border-2 border-neo-black shadow-neo-sm flex items-center gap-2">
+                        <div className="bg-neo-white px-3 py-2 border-2 border-neo-black shadow-neo-sm flex items-center gap-2">
                             <div className="flex gap-1">
-                                <span className="w-2 h-2 bg-neo-black rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></span>
-                                <span className="w-2 h-2 bg-neo-black rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></span>
-                                <span className="w-2 h-2 bg-neo-black rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></span>
+                                <span className="w-1.5 h-1.5 bg-neo-black rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></span>
+                                <span className="w-1.5 h-1.5 bg-neo-black rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></span>
+                                <span className="w-1.5 h-1.5 bg-neo-black rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></span>
                             </div>
                         </div>
                     </div>
@@ -123,13 +276,13 @@ export function ChatInterface() {
             </div>
 
             {/* Input Area */}
-            <div className="p-4 bg-neo-white border-t-3 border-neo-black">
+            <div className="p-3 bg-neo-white border-t-3 border-neo-black">
                 <div className="flex gap-2">
                     <input
                         type="text"
-                        className="flex-1 bg-neo-bg border-2 border-neo-black px-4 py-3 text-sm font-bold text-neo-black 
+                        className="flex-1 bg-neo-bg border-2 border-neo-black px-3 py-2 text-sm font-bold text-neo-black 
                         focus:shadow-neo focus:outline-none transition-all placeholder:text-neo-black/40"
-                        placeholder="Posez une question sur l'expression des gènes..."
+                        placeholder="Posez une question..."
                         value={input}
                         onChange={(e) => setInput(e.target.value)}
                         onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
@@ -137,12 +290,35 @@ export function ChatInterface() {
                     <button
                         onClick={sendMessage}
                         disabled={isLoading || !input.trim()}
-                        className="bg-neo-black text-neo-white border-2 border-neo-black px-4 py-2 hover:bg-neo-primary hover:text-neo-black hover:shadow-neo transition-all disabled:opacity-50 disabled:cursor-not-allowed active:translate-x-1 active:translate-y-1 active:shadow-none"
+                        className="bg-neo-black text-neo-white border-2 border-neo-black px-3 py-2 hover:bg-neo-primary hover:text-neo-black hover:shadow-neo transition-all disabled:opacity-50 disabled:cursor-not-allowed active:translate-x-0.5 active:translate-y-0.5 active:shadow-none"
                     >
-                        <Send size={18} />
+                        <Send size={16} />
                     </button>
                 </div>
             </div>
+
+            {/* Resize Handles */}
+            {/* Sides */}
+            <div onMouseDown={(e) => handleResizeMouseDown(e, 'n')} className="absolute top-0 left-2 right-2 h-1 cursor-ns-resize z-50"></div>
+            <div onMouseDown={(e) => handleResizeMouseDown(e, 's')} className="absolute bottom-0 left-2 right-2 h-1 cursor-ns-resize z-50"></div>
+            <div onMouseDown={(e) => handleResizeMouseDown(e, 'w')} className="absolute left-0 top-2 bottom-2 w-1 cursor-ew-resize z-50"></div>
+            <div onMouseDown={(e) => handleResizeMouseDown(e, 'e')} className="absolute right-0 top-2 bottom-2 w-1 cursor-ew-resize z-50"></div>
+
+            {/* Corners */}
+            <div onMouseDown={(e) => handleResizeMouseDown(e, 'nw')} className="absolute top-0 left-0 w-3 h-3 cursor-nw-resize z-50"></div>
+            <div onMouseDown={(e) => handleResizeMouseDown(e, 'ne')} className="absolute top-0 right-0 w-3 h-3 cursor-ne-resize z-50"></div>
+            <div onMouseDown={(e) => handleResizeMouseDown(e, 'sw')} className="absolute bottom-0 left-0 w-3 h-3 cursor-sw-resize z-50"></div>
+            <div onMouseDown={(e) => handleResizeMouseDown(e, 'se')} className="absolute bottom-0 right-0 w-3 h-3 cursor-se-resize z-50">
+                {/* Visual indicator only for SE corner */}
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                    className="absolute bottom-0.5 right-0.5 opacity-50 pointer-events-none text-neo-black">
+                    <path d="M21 15v6" />
+                    <path d="M15 21h6" />
+                    <path d="M21 3l-18 18" opacity="0.2" />
+                    <path d="M21 9l-12 12" />
+                </svg>
+            </div>
+
         </div>
     );
 }
