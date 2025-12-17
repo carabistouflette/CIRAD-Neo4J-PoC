@@ -1,0 +1,31 @@
+@import "tailwindcss";
+
+@theme {
+    --color-neo-white: #FFFFFE;
+    --color-neo-black: #050505;
+    --color-neo-primary: #FF6B6B;
+    --color-neo-secondary: #4ECDC4;
+    --color-neo-accent: #FFE66D;
+    --color-neo-bg: #F7F7F7;
+
+    --shadow-neo: 4px 4px 0px 0px #050505;
+    --shadow-neo-sm: 2px 2px 0px 0px #050505;
+    --shadow-neo-lg: 8px 8px 0px 0px #050505;
+
+    --radius-neo: 0px;
+}
+
+@layer base {
+    body {
+        @apply bg-neo-bg text-neo-black font-mono;
+    }
+
+    h1,
+    h2,
+    h3,
+    h4,
+    h5,
+    h6 {
+        @apply font-black uppercase tracking-tight;
+    }
+}
