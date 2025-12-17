@@ -6,15 +6,9 @@ import com.ganoderma.platform.repository.GeneRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.ai.chat.messages.Message;
-import org.springframework.ai.chat.messages.SystemMessage;
-import org.springframework.ai.chat.messages.UserMessage;
-import org.springframework.ai.chat.prompt.Prompt;
-import org.springframework.ai.chat.prompt.PromptTemplate;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
-import java.util.Map;
 import java.util.stream.Collectors;
 
 @Service
@@ -86,6 +80,64 @@ public class GraphRagService {
         // to prove RAG pipeline works
         // This is a placeholder. Real implementation needs Vector Store.
         return geneRepository.findAll().stream().limit(5).collect(Collectors.toList());
+    }
+
+    private static final String CYPHER_GEN_SYSTEM_PROMPT = """
+            You are a Neo4j Cypher expert assisting a researcher.
+            Translate the user's natural language request into a valid Cypher query.
+
+            DATABASE SCHEMA:
+            Nodes:
+            - :Isolate {name, originCountry, host, collectionDate}
+            - :Gene {geneId, symbol, description, biotype}
+            - :Orthogroup {groupId, geneCount}
+
+            Relationships:
+            - (:Gene)-[:FOUND_IN]->(:Isolate)
+            - (:Gene)-[:BELONGS_TO_OG]->(:Orthogroup)
+
+            DATA CONTEXT:
+            - Gene symbols usually start with prefixes like 'Tox' (Toxins), 'Eff' (Effectors), 'Reg' (Regulators).
+            - Example Symbols: 'Tox42', 'Eff10'.
+            - Isolate names: 'G. boninense IND1', 'G. boninense MYS2'.
+            - Valid Countries (ALWAYS use these specific English names): 'Indonesia', 'Malaysia', 'Cameroon', 'Thailand', 'Papua New Guinea', 'Brazil', 'Columbia'.
+
+            RULES:
+            1. Output ONLY the Cypher query. No markdown explanation. No code blocks.
+            2. ALWAYS use a LIMIT clause (max 500) to prevent crashing the UI.
+            3. USE PATHS: To ensure links are visible, ALWAYS bind the pattern to a path variable and return the path.
+               - BAD: `MATCH (a)-[:FOUND_IN]->(b) RETURN a, b` (Missing relationship)
+               - BAD: `MATCH (a)-[r:FOUND_IN]->(b) RETURN a, r, b` (Better, but error-prone)
+               - BEST: `MATCH p = (a)-[:FOUND_IN]->(b) RETURN p` (Perfect, includes everything)
+               - COMPLEX: `MATCH p1=(a)-[:FOUND_IN]->(b), p2=(b)-[:BELONGS_TO_OG]->(c) RETURN p1, p2`
+            4. If the user asks for "Toxins", use `WHERE g.symbol STARTS WITH 'Tox'`. DO NOT use 'CONTAINS "Toxin"' as the symbol is just 'Tox...'.
+            5. Translate French country names to the English values in DATA CONTEXT (e.g. 'Cameroun' -> 'Cameroon', 'Brésil' -> 'Brazil').
+            6. CONTEXT IS KING: Use Paths to include context. Example: `MATCH p = (i:Isolate)-[:FOUND_IN]-(g:Gene)-[:BELONGS_TO_OG]-(og:Orthogroup) RETURN p`.
+            7. If the request is vague, return a general sampling (LIMIT 50).
+            """;
+
+    /***
+     * Generates a Cypher query from natural language.
+     */
+    public String generateCypher(String userRequest) {
+        ChatClient chatClient = chatClientBuilder.build();
+
+        String cypher = chatClient.prompt()
+                .system(CYPHER_GEN_SYSTEM_PROMPT)
+                .user(userRequest)
+                .call()
+                .content();
+
+        // Clean up markdown if the LLM adds it despite instructions
+        if (cypher.startsWith("```cypher")) {
+            cypher = cypher.replace("```cypher", "").replace("```", "");
+        } else if (cypher.startsWith("```")) {
+            cypher = cypher.replace("```", "");
+        }
+
+        cypher = cypher.trim();
+        System.out.println("AI Generated Cypher: " + cypher);
+        return cypher;
     }
 
     private String formatContext(List<Gene> genes) {

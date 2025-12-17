@@ -27,6 +27,95 @@ public class GraphController {
     private final GeneRepository geneRepository;
     private final IsolateRepository isolateRepository;
     private final OrthogroupRepository orthogroupRepository;
+    private final org.springframework.data.neo4j.core.Neo4jClient neo4jClient;
+
+    @org.springframework.web.bind.annotation.PostMapping("/cypher")
+    public GraphDto executeCypher(@org.springframework.web.bind.annotation.RequestBody Map<String, String> payload) {
+        String query = payload.get("query");
+        if (query == null || query.trim().isEmpty()) {
+            return GraphDto.builder().nodes(new ArrayList<>()).links(new ArrayList<>()).build();
+        }
+
+        java.util.Collection<Map<String, Object>> results = neo4jClient.query(query).fetch().all();
+
+        // Use Sets to avoid duplicates when multiple rows return same node/rel
+        java.util.Map<String, GraphDto.NodeDto> nodeMap = new HashMap<>(); // Key: ID
+        java.util.Map<String, GraphDto.LinkDto> linkMap = new HashMap<>(); // Key: ID (if available) or complex key
+
+        for (Map<String, Object> row : results) {
+            for (Object val : row.values()) {
+                processResultItem(val, nodeMap, linkMap);
+            }
+        }
+
+        return GraphDto.builder()
+                .nodes(new ArrayList<>(nodeMap.values()))
+                .links(new ArrayList<>(linkMap.values()))
+                .build();
+    }
+
+    private void processResultItem(Object val, Map<String, GraphDto.NodeDto> nodes,
+            Map<String, GraphDto.LinkDto> links) {
+        if (val instanceof org.neo4j.driver.types.Node) {
+            org.neo4j.driver.types.Node n = (org.neo4j.driver.types.Node) val;
+            // ID strategy: Use elementId if available (Neo4j 5), else id
+            String id = n.elementId();
+
+            // Determine "Name" (first property that looks namy)
+            String name = n.containsKey("name") ? n.get("name").asString()
+                    : n.containsKey("symbol") ? n.get("symbol").asString()
+                            : n.containsKey("groupId") ? n.get("groupId").asString()
+                                    : n.containsKey("geneId") ? n.get("geneId").asString() : id;
+
+            // Details
+            Map<String, String> details = new HashMap<>();
+            n.keys().forEach(k -> details.put(k, String.valueOf(n.get(k))));
+
+            // Type (First label)
+            String rawType = n.labels().iterator().hasNext() ? n.labels().iterator().next() : "Unknown";
+
+            // Map raw Neo4j labels to Frontend NodeTypes
+            String type = rawType;
+            if ("Orthogroup".equals(rawType)) {
+                type = "Pathway"; // Visual proxy for Orthogroup
+            }
+
+            // Visual Tweaks based on type (mimic existing logic or default)
+            int valSize = type.equals("Isolate") ? 25 : type.equals("Gene") ? 15 : 20;
+
+            GraphDto.NodeDto nodeDto = GraphDto.NodeDto.builder()
+                    .id(id) // Ensure frontend uses this ID for linking
+                    .name(name)
+                    .type(type)
+                    .val(valSize)
+                    .description(details.get("description"))
+                    .details(details)
+                    .build();
+
+            nodes.put(id, nodeDto);
+
+        } else if (val instanceof org.neo4j.driver.types.Relationship) {
+            org.neo4j.driver.types.Relationship r = (org.neo4j.driver.types.Relationship) val;
+            String sourceId = r.startNodeElementId();
+            String targetId = r.endNodeElementId();
+            String id = r.elementId();
+
+            GraphDto.LinkDto linkDto = GraphDto.LinkDto.builder()
+                    .source(sourceId)
+                    .target(targetId)
+                    .label(r.type())
+                    .build();
+
+            links.put(id, linkDto);
+
+        } else if (val instanceof List) {
+            ((List<?>) val).forEach(item -> processResultItem(item, nodes, links));
+        } else if (val instanceof org.neo4j.driver.types.Path) {
+            org.neo4j.driver.types.Path p = (org.neo4j.driver.types.Path) val;
+            p.nodes().forEach(n -> processResultItem(n, nodes, links));
+            p.relationships().forEach(r -> processResultItem(r, nodes, links));
+        }
+    }
 
     @GetMapping
     public GraphDto getGraph() {
