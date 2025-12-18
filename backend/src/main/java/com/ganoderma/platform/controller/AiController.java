@@ -20,7 +20,7 @@ public class AiController {
         if (prompt == null || prompt.trim().isEmpty()) {
             throw new IllegalArgumentException("Prompt cannot be empty");
         }
-        String cypher = graphRagService.generateCypher(prompt);
+        String cypher = graphRagService.generateCypher(prompt, null);
         return Map.of("cypher", cypher);
     }
 }

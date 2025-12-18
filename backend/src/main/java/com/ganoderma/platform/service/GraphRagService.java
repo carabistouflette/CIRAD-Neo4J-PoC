@@ -40,6 +40,9 @@ public class GraphRagService {
             2. If the answer is not in the context, state "I do not have this information in my database."
             3. Do not hallucinate genes, expression values, or biological facts not present in the content.
             4. If the Scope is specific (e.g. Isolate), focus your answer on that entity.
+            5. INTERACTIVE REFERENCES: When you mention a specific graph element (Isolate, Gene, Orthogroup) that is likely to be in the graph, YOU MUST WRAP ITS NAME in double angle brackets, like <<G. boninense>> or <<ToxA>>. This allows the user to click and see it in the graph. Do this for every significant entity occurrence.
+            6. NO META-COMMENTARY: Do not mention "context data", "provided snippets", or "internal limits". Do not say "The context contains X items". Just answer the question directly.
+            7. NO UI INSTRUCTIONS: Do not tell the user to "click on the names". The interface handles this. Just provide the information naturally.
 
             CONTEXT DATA:
             {context}
@@ -50,85 +53,91 @@ public class GraphRagService {
         String scope = request.getScope() != null ? request.getScope() : "GLOBAL";
         String contextJson = "";
 
-        // 1. Context Retrieval Strategy
-        if ("ENTITY".equals(scope) && request.getEntityId() != null) {
-            contextJson = retrieveEntityContext(request.getEntityId());
-        } else if ("GRAPH".equals(scope) && request.getContextIds() != null) {
-            contextJson = retrieveGraphContext(request.getContextIds());
-        } else {
-            // Default Global/Search strategy
-            contextJson = retrieveContext(userQuestion);
+        // 1. Context Retrieval Strategy (Unified)
+        // Always start with global search/knowledge
+        contextJson = retrieveContext(userQuestion);
+
+        // Append Explicit Graph Context if available (What the user sees)
+        if (request.getContextIds() != null && !request.getContextIds().isEmpty()) {
+            String graphContext = retrieveGraphContext(request.getContextIds());
+            if (contextJson.length() + graphContext.length() < 12000) { // Simple token safety check (approx)
+                contextJson += "\n\n=== USER VISIBLE GRAPH CONTEXT ===\n(The user is currently looking at these nodes)\n"
+                        + graphContext;
+            } else {
+                contextJson += "\n\n=== USER VISIBLE GRAPH CONTEXT ===\n(Context too large, using partial)\n"
+                        + graphContext.substring(0, 2000) + "...";
+            }
         }
 
-        // 2. Construct Prompt
-        final String finalContextJson = contextJson != null ? contextJson : "";
-        ChatClient chatClient = chatClientBuilder.build();
+        // Special specific Entity focus override if needed, but usually GraphContext
+        // covers it if the node is visible.
+        if (request.getEntityId() != null && (request.getContextIds() == null || request.getContextIds().isEmpty())) {
+            String entityCtx = retrieveEntityContext(request.getEntityId());
+            contextJson += "\n\n=== FOCUSED ENTITY ===\n" + entityCtx;
+        }
 
-        // 3. Intent Detection for Visualization (Only for GLOBAL scope)
+        // 2. Build Message History EARLY (Used for both Cypher Gen and Final Answer)
+        List<Message> history = new ArrayList<>();
+
+        if (request.getHistory() != null) {
+            for (ChatDto.MessageDto msg : request.getHistory()) {
+                if ("user".equalsIgnoreCase(msg.getRole())) {
+                    // Prevent consecutive user messages
+                    if (!history.isEmpty() && history.get(history.size() - 1) instanceof UserMessage) {
+                        continue;
+                    }
+                    history.add(new UserMessage(msg.getContent()));
+                } else if ("assistant".equalsIgnoreCase(msg.getRole())) {
+                    // Prevent consecutive assistant messages
+                    if (!history.isEmpty() && history.get(history.size() - 1) instanceof AssistantMessage) {
+                        continue;
+                    }
+                    if (history.isEmpty() || !(history.get(history.size() - 1) instanceof UserMessage)) {
+                        continue;
+                    }
+                    history.add(new AssistantMessage(msg.getContent()));
+                }
+            }
+        }
+
+        // Ensure the last message in history is NOT a UserMessage
+        if (!history.isEmpty() && history.get(history.size() - 1) instanceof UserMessage) {
+            history.remove(history.size() - 1);
+        }
+
+        // 3. Intent Detection & Cypher Generation (Only for GLOBAL scope)
         String cypherQuery = null;
+        String finalContextJson = contextJson != null ? contextJson : "";
         String updatedContext = finalContextJson;
 
         if ("GLOBAL".equals(scope)) {
             String intent = detectIntent(userQuestion);
             if ("VISUALIZATION".equals(intent)) {
-                cypherQuery = generateCypher(userQuestion);
+                // Pass history to allow refinement
+                cypherQuery = generateCypher(userQuestion, history);
                 if (cypherQuery != null) {
-                    updatedContext += "\n[SYSTEM: I am updating the graph based on your request. The user will see the new data shortly.]";
+                    updatedContext += "\n[SYSTEM: A Cypher query has been generated to update the graph. Briefly explain to the user what data is being visualized based on their request. Do not mention technical Cypher details, just the biological data.]";
                 }
             }
         }
 
         final String activeContext = updatedContext;
 
-        // 4. Build Message History
+        // 4. Build Final Messages for Chat Response (Combine System + History + User)
+        List<Message> chatMessages = new ArrayList<>();
+        chatMessages
+                .add(new SystemMessage(SYSTEM_PROMPT.replace("{context}", activeContext).replace("{scope}", scope)));
+        chatMessages.addAll(history);
+        chatMessages.add(new UserMessage(userQuestion));
 
-        List<Message> messages = new ArrayList<>();
-
-        // System Prompt first
-        messages.add(new SystemMessage(SYSTEM_PROMPT.replace("{context}", activeContext).replace("{scope}",
-                scope != null ? scope : "GLOBAL")));
-
-        // Append History if available
-        if (request.getHistory() != null) {
-            for (ChatDto.MessageDto msg : request.getHistory()) {
-                if ("user".equalsIgnoreCase(msg.getRole())) {
-                    // Prevent consecutive user messages (e.g. from retries after error)
-                    if (!messages.isEmpty() && messages.get(messages.size() - 1) instanceof UserMessage) {
-                        continue;
-                    }
-                    messages.add(new UserMessage(msg.getContent()));
-                } else if ("assistant".equalsIgnoreCase(msg.getRole())) {
-                    // Prevent consecutive assistant messages (rare but possible)
-                    if (!messages.isEmpty() && messages.get(messages.size() - 1) instanceof AssistantMessage) {
-                        continue;
-                    }
-                    // CRITICAL FIX: Assistant MUST follow a User message.
-                    // If the list only has SystemMessage (or ends with System/Assistant), skip this
-                    // Assistant message.
-                    if (messages.isEmpty() || !(messages.get(messages.size() - 1) instanceof UserMessage)) {
-                        continue;
-                    }
-                    messages.add(new AssistantMessage(msg.getContent()));
-                }
-            }
-        }
-
-        // Ensure the last message in history is NOT a UserMessage (because we are about
-        // to add one)
-        if (!messages.isEmpty() && messages.get(messages.size() - 1) instanceof UserMessage) {
-            messages.remove(messages.size() - 1);
-        }
-
-        // Add current user message
-        messages.add(new UserMessage(userQuestion));
-
+        ChatClient chatClient = chatClientBuilder.build();
         String aiResponse = chatClient.prompt()
-                .messages(messages)
+                .messages(chatMessages)
                 .call()
                 .content();
 
         if (cypherQuery != null) {
-            aiResponse += "\n\n(I am updating the graph view to focus on this.)";
+            // System instruction handles the explanation now
         }
 
         return new ChatDto.Response(aiResponse, request.getEntityId(), cypherQuery);
@@ -240,6 +249,7 @@ public class GraphRagService {
             4. If the question is about a scientific name (e.g., species, genus), output that name.
             5. If the question is vague, output the most relevant noun phrase.
             6. TRANSLATE the term to English if needed (e.g., "Cameroun" -> "Cameroon", "palmier" -> "palm").
+            7. SPECIAL CASE: If the user asks about the database content, the amount of data, or general statistics (e.g. "what is in the db", "qu'y a-t-il dedans"), output EXACTLY: 'DATABASE_STATS'.
 
             Examples:
             - "c'est quoi Elaeis guineensis?" -> "Elaeis guineensis"
@@ -248,6 +258,8 @@ public class GraphRagService {
             - "parle moi des isolats du cameroun" -> "Cameroon"
             - "Elais guinensis" (typo) -> "Elaeis guineensis"
             - "les champignons de malaisie" -> "Malaysia"
+            - "qu'est ce qu'il y a dans la base?" -> "DATABASE_STATS"
+            - "combien de données ?" -> "DATABASE_STATS"
             """;
 
     private String extractSearchTerm(String question) {
@@ -260,44 +272,90 @@ public class GraphRagService {
         return term != null ? term.trim() : question; // Fallback to original if LLM fails
     }
 
+    private String getDatabaseSummary() {
+        long isolateCount = isolateRepository.count();
+        long geneCount = geneRepository.count();
+        long ogCount = orthogroupRepository.count();
+        // Potential improvement: fetch distinct countries using a custom query if
+        // needed,
+        // but for now simple counts are sufficient for "What is in the DB".
+        return String.format(
+                """
+
+                        === GENERAL DATABASE STATISTICS & CONTENT ===
+                        The database contains genomic data for the fungus Ganoderma boninense.
+                        - Total Isolates: %d (Pathogens from Indonesia, Malaysia, Cameroon, etc.)
+                        - Total Genes: %d (Functional annotations available)
+                        - Total Orthogroups: %d (Gene families)
+
+                        [INSTRUCTION TO AI: Use these statistics to answer general questions about what is in the database.]
+                        """,
+                isolateCount, geneCount, ogCount);
+    }
+
     private String retrieveContext(String question) {
         // Use AI to intelligently extract the search term
-        String searchTerm = extractSearchTerm(question);
+        String searchTerm = extractSearchTerm(question).trim();
+
+        // 0. Special Case: General Database Stats
+        if ("DATABASE_STATS".equalsIgnoreCase(searchTerm) || searchTerm.toLowerCase().contains("database")) {
+            return getDatabaseSummary();
+        }
 
         StringBuilder sb = new StringBuilder("Search Results for '" + searchTerm + "':\n");
         int count = 0;
         int maxItems = 20;
 
         // 1. Search Isolates (Host, Country, Name)
-        List<Isolate> isolates = new ArrayList<>();
-        isolates.addAll(isolateRepository.findByNameContainingIgnoreCase(searchTerm));
-        isolates.addAll(isolateRepository.findByHostContainingIgnoreCase(searchTerm));
-        isolates.addAll(isolateRepository.findByOriginCountryContainingIgnoreCase(searchTerm));
+        if (searchTerm.length() > 2) { // Avoid searching for 1-2 char terms which might match too many things
+            List<Isolate> isolates = new ArrayList<>();
+            isolates.addAll(isolateRepository.findByNameContainingIgnoreCase(searchTerm));
+            isolates.addAll(isolateRepository.findByHostContainingIgnoreCase(searchTerm));
+            isolates.addAll(isolateRepository.findByOriginCountryContainingIgnoreCase(searchTerm));
 
-        for (Isolate iso : isolates) {
-            if (count >= maxItems)
-                break;
-            sb.append(String.format("- Isolate: %s (Host: %s, Country: %s)\n", iso.getName(), iso.getHost(),
-                    iso.getOriginCountry()));
-            count++;
-        }
-
-        // 2. Search Genes (Symbol, Description)
-        if (count < maxItems) {
-            List<Gene> genes = new ArrayList<>();
-            genes.addAll(geneRepository.findBySymbolContainingIgnoreCase(searchTerm));
-            genes.addAll(geneRepository.findByDescriptionContainingIgnoreCase(searchTerm));
-
-            for (Gene g : genes) {
+            for (Isolate iso : isolates) {
                 if (count >= maxItems)
                     break;
-                sb.append(String.format("- Gene: %s (Desc: %s)\n", g.getSymbol(), g.getDescription()));
+                sb.append(String.format("- Isolate: %s (Host: %s, Country: %s)\n",
+                        iso.getName(), iso.getHost(), iso.getOriginCountry()));
                 count++;
+            }
+
+            // 2. Search Genes (Symbol, Description)
+            if (count < maxItems) {
+                List<Gene> genes = new ArrayList<>();
+                genes.addAll(geneRepository.findBySymbolContainingIgnoreCase(searchTerm));
+                genes.addAll(geneRepository.findByDescriptionContainingIgnoreCase(searchTerm));
+
+                for (Gene g : genes) {
+                    if (count >= maxItems)
+                        break;
+                    sb.append(String.format("- Gene: %s (Desc: %s)\n", g.getSymbol(), g.getDescription()));
+
+                    // Enrich with Relationships
+                    if (g.getIsolate() != null) {
+                        sb.append(String.format("    -> Found In Isolate: <<%s>> (Country: %s)\n",
+                                g.getIsolate().getName(), g.getIsolate().getOriginCountry()));
+                    }
+                    if (g.getOrthogroup() != null) {
+                        sb.append(String.format("    -> Part of Orthogroup: <<OG_%s>>\n",
+                                g.getOrthogroup().getGroupId()));
+                    }
+
+                    count++;
+                }
             }
         }
 
+        // 3. Fallback: Append Database Summary if search yielded poor results OR just
+        // as context
         if (count == 0) {
-            return "No specific entities found in database matching: " + searchTerm;
+            sb.append("\n(No specific entities found matching '" + searchTerm
+                    + "'. However, here is the general database context below:)\n");
+            sb.append(getDatabaseSummary());
+        } else {
+            // Even if found, maybe useful?
+            // sb.append(getDatabaseSummary()); // Optional, might be noise
         }
 
         return sb.toString();
@@ -336,6 +394,7 @@ public class GraphRagService {
             246:             5. If the user asks for "Toxins", use `WHERE g.symbol STARTS WITH 'Tox'`. DO NOT use 'CONTAINS "Toxin"'.
             247:             6. Translate French country names to the English values in DATA CONTEXT.
             248:             7. If the request is vague, return a general sampling (LIMIT 50) using the full context pattern.
+            249:             8. HISTORY/REFINEMENT: If the user message is a refinement of a previous query (e.g. "Only from Malaysia", "Add genes"), MODIFY the previous query or logic implied by the conversation history.
             """;
 
     private static final String INTENT_DETECTION_PROMPT = """
@@ -352,25 +411,34 @@ public class GraphRagService {
 
     private String detectIntent(String userRequest) {
         ChatClient chatClient = chatClientBuilder.build();
-        return chatClient.prompt()
+        String result = chatClient.prompt()
                 .system(INTENT_DETECTION_PROMPT)
                 .user(userRequest)
                 .call()
-                .content()
-                .trim();
+                .content();
+        return result != null ? result.trim() : "QA";
     }
 
     /***
      * Generates a Cypher query from natural language.
      */
-    public String generateCypher(String userRequest) {
+    public String generateCypher(String userRequest, List<Message> history) {
         ChatClient chatClient = chatClientBuilder.build();
 
+        List<Message> messages = new ArrayList<>();
+        messages.add(new SystemMessage(CYPHER_GEN_SYSTEM_PROMPT));
+        if (history != null) {
+            messages.addAll(history);
+        }
+        messages.add(new UserMessage(userRequest));
+
         String cypher = chatClient.prompt()
-                .system(CYPHER_GEN_SYSTEM_PROMPT)
-                .user(userRequest)
+                .messages(messages)
                 .call()
                 .content();
+
+        if (cypher == null)
+            return null;
 
         // Clean up markdown if the LLM adds it despite instructions
         if (cypher.startsWith("```cypher")) {
