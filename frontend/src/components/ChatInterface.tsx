@@ -1,6 +1,5 @@
-
 import { useState, useRef, useEffect } from 'react';
-import { Send, Bot, User, Sparkles, Trash2, Minus, Maximize2, Database, Network } from 'lucide-react';
+import { Send, Bot, User, Sparkles, Trash2, Minus, Maximize2, Database, Network, Play, X, Edit2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 
 interface Message {
@@ -45,6 +44,9 @@ export function ChatInterface({
     const [isMinimized, setIsMinimized] = useState(true);
     const [size, setSize] = useState({ width: 400, height: 600 });
     const [position, setPosition] = useState({ x: window.innerWidth - 420, y: 100 });
+
+    // Cypher Review State
+    const [pendingCypher, setPendingCypher] = useState<string | null>(null);
 
     // Drag/Resize State
     const [isDragging, setIsDragging] = useState(false);
@@ -179,7 +181,8 @@ export function ChatInterface({
                     message: userMsg,
                     scope: scope,
                     entityId: scope === 'ENTITY' ? entityId : undefined,
-                    contextIds: scope === 'GRAPH' ? contextGraphIds : undefined
+                    contextIds: scope === 'GRAPH' ? contextGraphIds : undefined,
+                    history: messages.map(m => ({ role: m.role, content: m.content }))
                 })
             });
 
@@ -191,8 +194,9 @@ export function ChatInterface({
 
             // Check for Graph Update Command
             if (data.cypherQuery && onRunCypher) {
-                console.log("AI requested graph update:", data.cypherQuery);
-                onRunCypher(data.cypherQuery);
+                console.log("AI intercepted graph update:", data.cypherQuery);
+                // Instead of auto-running, set it for review
+                setPendingCypher(data.cypherQuery);
             }
 
             setMessages(prev => [...prev, { role: 'assistant', content: data.answer }]);
@@ -202,6 +206,19 @@ export function ChatInterface({
         } finally {
             setIsLoading(false);
         }
+    };
+
+    const handleRunCypher = () => {
+        if (pendingCypher && onRunCypher) {
+            onRunCypher(pendingCypher);
+            setPendingCypher(null);
+            setMessages(prev => [...prev, { role: 'assistant', content: '✅ Requête validée et exécutée.' }]);
+        }
+    };
+
+    const handleCancelCypher = () => {
+        setPendingCypher(null);
+        setMessages(prev => [...prev, { role: 'assistant', content: '❌ Requête annulée.' }]);
     };
 
     // Inner Content Component
@@ -314,7 +331,32 @@ export function ChatInterface({
                     </div>
                 )}
                 <div ref={messagesEndRef} />
+                <div ref={messagesEndRef} />
             </div>
+
+            {/* Cypher Review Panel */}
+            {pendingCypher && (
+                <div className="bg-neo-accent/20 p-3 border-t-3 border-neo-black space-y-2">
+                    <div className="flex items-center justify-between">
+                        <span className="text-xs font-black uppercase text-neo-black flex items-center gap-1">
+                            <Sparkles size={12} /> Review Cypher Query
+                        </span>
+                        <div className="flex gap-1">
+                            <button onClick={handleRunCypher} className="p-1 bg-neo-black text-neo-accent hover:bg-neo-primary text-xs font-bold flex items-center gap-1">
+                                <Play size={12} /> Run
+                            </button>
+                            <button onClick={handleCancelCypher} className="p-1 bg-neo-white text-neo-black border-2 border-neo-black hover:bg-neo-bg text-xs font-bold">
+                                <X size={12} />
+                            </button>
+                        </div>
+                    </div>
+                    <textarea
+                        className="w-full h-24 bg-neo-white border-2 border-neo-black p-2 text-xs font-mono resize-none focus:outline-none focus:shadow-neo"
+                        value={pendingCypher}
+                        onChange={(e) => setPendingCypher(e.target.value)}
+                    />
+                </div>
+            )}
 
             {/* Input Area */}
             <div className="p-3 bg-neo-white border-t-3 border-neo-black">

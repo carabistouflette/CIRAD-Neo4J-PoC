@@ -5,7 +5,7 @@ import { ChatInterface } from './ChatInterface';
 
 // --- Types ---
 
-type NodeType = 'Gene' | 'Isolate' | 'Sample' | 'Pathway' | 'Orthogroup';
+type NodeType = 'Gene' | 'Isolate' | 'Sample' | 'Orthogroup';
 
 interface GraphNode {
     id: string;
@@ -37,7 +37,7 @@ const NODE_CONFIG: Record<NodeType, { color: string; shape: 'circle' | 'square' 
     'Gene': { color: '#FFE66D', shape: 'circle', label: 'Gène' },       // Yellow
     'Isolate': { color: '#FF6B6B', shape: 'square', label: 'Isolat' },   // Red
     'Sample': { color: '#4ECDC4', shape: 'triangle', label: 'Échantillon' }, // Teal
-    'Pathway': { color: '#050505', shape: 'diamond', label: 'Voie Métabolique' }, // Black
+    // 'Pathway' removed as it was an alias for Orthogroup
     'Orthogroup': { color: '#8E44AD', shape: 'diamond', label: 'Orthogroupe' } // Purple
 };
 
@@ -60,7 +60,7 @@ export function GraphViz({ initialData, onExecuteQuery }: GraphVizProps) {
     const [showChat, setShowChat] = useState(false);
     const [isPanelOpen, setIsPanelOpen] = useState(true);
     const [searchQuery, setSearchQuery] = useState('');
-    const [activeFilters, setActiveFilters] = useState<NodeType[]>(['Isolate', 'Sample', 'Pathway', 'Orthogroup']); // 'Gene' hidden by default
+    const [activeFilters, setActiveFilters] = useState<NodeType[]>(['Isolate', 'Sample', 'Orthogroup']); // 'Gene' hidden by default
     const [isFilterCollapsed, setIsFilterCollapsed] = useState(false); // Collapsible filters
 
     // Fetch Data (Only if no initialData)
@@ -176,6 +176,15 @@ export function GraphViz({ initialData, onExecuteQuery }: GraphVizProps) {
     useEffect(() => {
         setShowChat(false);
     }, [selectedNode]);
+
+    // Data for Chat Context: Use logicalId if available (for Backend lookup)
+    const contextGraphIds = useMemo(() => {
+        // visibleData.nodes is already filtered by activeFilters
+        return visibleData.nodes.map(node => {
+            // Use injected logicalId (from GraphController) if present, else fallback to ID
+            return node?.details?.logicalId || (node.id as string);
+        });
+    }, [visibleData.nodes]);
 
     // Custom Node Rendering
     const drawNode = (node: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
@@ -342,7 +351,7 @@ export function GraphViz({ initialData, onExecuteQuery }: GraphVizProps) {
                         defaultScope={selectedNode ? 'ENTITY' : 'GLOBAL'}
                         entityId={selectedNode?.id}
                         entityName={selectedNode?.name}
-                        contextGraphIds={data.nodes.map((n: GraphNode) => n.id)}
+                        contextGraphIds={contextGraphIds}
                         // If we are in "Explicit Connect" mode (showChat=true), show close button to go back to details
                         // If we are in "Global Mode" (!selectedNode), no close button
                         onClose={selectedNode ? () => setShowChat(false) : undefined}
