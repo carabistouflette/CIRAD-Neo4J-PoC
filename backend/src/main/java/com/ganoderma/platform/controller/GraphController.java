@@ -58,33 +58,41 @@ public class GraphController {
             Map<String, GraphDto.LinkDto> links) {
         if (val instanceof org.neo4j.driver.types.Node) {
             org.neo4j.driver.types.Node n = (org.neo4j.driver.types.Node) val;
-            // ID strategy: Use elementId if available (Neo4j 5), else id
-            String id = n.elementId();
 
-            // Determine "Name" (first property that looks namy)
-            String name = n.containsKey("name") ? n.get("name").asString()
-                    : n.containsKey("symbol") ? n.get("symbol").asString()
-                            : n.containsKey("groupId") ? n.get("groupId").asString()
-                                    : n.containsKey("geneId") ? n.get("geneId").asString() : id;
-
-            // Details
-            Map<String, String> details = new HashMap<>();
-            n.keys().forEach(k -> details.put(k, String.valueOf(n.get(k))));
-
-            // Type (First label)
+            // Determine Type (First label)
             String rawType = n.labels().iterator().hasNext() ? n.labels().iterator().next() : "Unknown";
-
-            // Map raw Neo4j labels to Frontend NodeTypes
             String type = rawType;
             if ("Orthogroup".equals(rawType)) {
                 type = "Pathway"; // Visual proxy for Orthogroup
             }
 
-            // Visual Tweaks based on type (mimic existing logic or default)
+            // ID Strategy: Use elementId (Internal Neo4j ID) to ensure consistency with
+            // Relationships
+            // D3/Vis requires source/target to match node ID exactly.
+            String id = n.elementId();
+            String name = id; // Default name
+
+            // Determine Name based on properties (but keep ID as technical ID)
+            if (n.hasLabel("Isolate") && n.containsKey("name")) {
+                name = n.get("name").asString();
+            } else if (n.hasLabel("Gene")) {
+                name = n.containsKey("symbol") ? n.get("symbol").asString()
+                        : (n.containsKey("geneId") ? n.get("geneId").asString() : id);
+            } else if (n.hasLabel("Orthogroup") && n.containsKey("groupId")) {
+                name = n.get("groupId").asString();
+            } else {
+                name = n.containsKey("name") ? n.get("name").asString() : id;
+            }
+
+            // Details
+            Map<String, String> details = new HashMap<>();
+            n.keys().forEach(k -> details.put(k, String.valueOf(n.get(k))));
+
+            // Visual Tweaks
             int valSize = type.equals("Isolate") ? 25 : type.equals("Gene") ? 15 : 20;
 
             GraphDto.NodeDto nodeDto = GraphDto.NodeDto.builder()
-                    .id(id) // Ensure frontend uses this ID for linking
+                    .id(id) // MUST be elementId to match Relationship source/target
                     .name(name)
                     .type(type)
                     .val(valSize)

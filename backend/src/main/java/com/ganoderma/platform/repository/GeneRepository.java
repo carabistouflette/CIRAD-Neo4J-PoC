@@ -14,6 +14,10 @@ public interface GeneRepository extends Neo4jRepository<Gene, String> {
 
     List<Gene> findBySymbolLike(String symbol);
 
+    List<Gene> findBySymbolContainingIgnoreCase(String symbol);
+
+    List<Gene> findByDescriptionContainingIgnoreCase(String description);
+
     // Custom Query: Find genes in a specific orthogroup
     @Query("MATCH (g:Gene)-[:BELONGS_TO_OG]->(og:Orthogroup {groupId: $groupId}) RETURN g")
     List<Gene> findByOrthogroupId(String groupId);

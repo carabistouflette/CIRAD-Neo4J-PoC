@@ -15,6 +15,6 @@ public class ChatController {
 
     @PostMapping
     public ChatDto.Response chat(@RequestBody ChatDto.Request request) {
-        return graphRagService.ask(request.getMessage());
+        return graphRagService.ask(request);
     }
 }

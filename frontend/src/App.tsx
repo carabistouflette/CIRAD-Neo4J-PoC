@@ -3,7 +3,7 @@ import { LandingSection } from './components/layout/LandingSection';
 import { StatsGrid } from './components/dashboard/StatsGrid';
 import { GraphContainer } from './components/dashboard/GraphContainer';
 import { GraphViz } from './components/GraphViz';
-import { ChatInterface } from './components/ChatInterface';
+
 import { QuerySelector } from './components/dashboard/QuerySelector';
 
 function App() {
@@ -66,7 +66,7 @@ function App() {
             {!graphData ? (
               <QuerySelector onExecute={handleQuery} isLoading={isQueryLoading} />
             ) : (
-              <GraphViz initialData={graphData} />
+              <GraphViz initialData={graphData} onExecuteQuery={handleQuery} />
             )}
           </GraphContainer>
         </div>
@@ -78,10 +78,9 @@ function App() {
             <StatsGrid />
           </div>
 
-          {/* Chat Interface (Fixed/Floating) */}
-          <ChatInterface />
-        </div>
 
+
+        </div>
       </div>
     </div>
   );

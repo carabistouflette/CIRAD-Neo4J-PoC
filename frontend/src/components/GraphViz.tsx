@@ -1,10 +1,11 @@
 import { useRef, useEffect, useState, useMemo } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
-import { Scan, RefreshCw, Search, X, Filter, Info, Share2, Database, ChevronDown, ChevronUp } from 'lucide-react';
+import { Scan, RefreshCw, Search, X, Filter, Info, Share2, Database, ChevronDown, ChevronUp, MessageSquare, ChevronRight, ChevronLeft } from 'lucide-react';
+import { ChatInterface } from './ChatInterface';
 
 // --- Types ---
 
-type NodeType = 'Gene' | 'Isolate' | 'Sample' | 'Pathway';
+type NodeType = 'Gene' | 'Isolate' | 'Sample' | 'Pathway' | 'Orthogroup';
 
 interface GraphNode {
     id: string;
@@ -36,57 +37,37 @@ const NODE_CONFIG: Record<NodeType, { color: string; shape: 'circle' | 'square' 
     'Gene': { color: '#FFE66D', shape: 'circle', label: 'Gène' },       // Yellow
     'Isolate': { color: '#FF6B6B', shape: 'square', label: 'Isolat' },   // Red
     'Sample': { color: '#4ECDC4', shape: 'triangle', label: 'Échantillon' }, // Teal
-    'Pathway': { color: '#050505', shape: 'diamond', label: 'Voie Métabolique' } // Black
+    'Pathway': { color: '#050505', shape: 'diamond', label: 'Voie Métabolique' }, // Black
+    'Orthogroup': { color: '#8E44AD', shape: 'diamond', label: 'Orthogroupe' } // Purple
 };
-
-// --- Mock Data Removed ---
 
 // --- Component ---
 
 interface GraphVizProps {
     initialData?: GraphData;
+    onExecuteQuery?: (query: string) => void;
 }
 
-export function GraphViz({ initialData }: GraphVizProps) {
+export function GraphViz({ initialData, onExecuteQuery }: GraphVizProps) {
     const fgRef = useRef<any>(null);
     const containerRef = useRef<HTMLDivElement>(null);
-    const [data, setData] = useState<GraphData>(initialData || { nodes: [], links: [] });
+    const data = initialData || { nodes: [], links: [] };
     const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
     const [, setIsLoading] = useState(true);
 
     // UI State
     const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
+    const [showChat, setShowChat] = useState(false);
+    const [isPanelOpen, setIsPanelOpen] = useState(true);
     const [searchQuery, setSearchQuery] = useState('');
-    const [activeFilters, setActiveFilters] = useState<NodeType[]>(['Isolate', 'Sample', 'Pathway']); // 'Gene' hidden by default
+    const [activeFilters, setActiveFilters] = useState<NodeType[]>(['Isolate', 'Sample', 'Pathway', 'Orthogroup']); // 'Gene' hidden by default
     const [isFilterCollapsed, setIsFilterCollapsed] = useState(false); // Collapsible filters
 
     // Fetch Data (Only if no initialData)
     useEffect(() => {
         if (initialData) {
             setIsLoading(false);
-            return;
         }
-
-        const fetchData = async () => {
-            try {
-                // Keep the default load for now if no data provided, or disable it?
-                // Plan says "Remove internal fetch".
-                // Let's keep it as fallback OR disable it to force QuerySelector usage.
-                // User said "Start with Selector".
-                // So if no initialData, we might want to do nothing (wait for parent).
-                // But App.tsx will handle the conditional rendering.
-                // If GraphViz is rendered, it should have data.
-
-                // Let's keep the fetch for backward compat (e.g. debugging) but typically it won't run if we control via App.
-                // Or better: Remove the default fetch to verify the architecture change.
-                // "Remove internal fetch".
-                // Okay, I will remove the fetch effect completely.
-                // The parent MUST provide data.
-            } catch (error) {
-                console.error("Error fetching graph data:", error);
-            }
-        };
-        // fetchData(); 
     }, [initialData]);
 
     // Responsive Sizing
@@ -190,6 +171,11 @@ export function GraphViz({ initialData }: GraphVizProps) {
             }
         }
     }, [searchQuery, data]);
+
+    // Reset Chat when selection changes
+    useEffect(() => {
+        setShowChat(false);
+    }, [selectedNode]);
 
     // Custom Node Rendering
     const drawNode = (node: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
@@ -337,13 +323,37 @@ export function GraphViz({ initialData }: GraphVizProps) {
                 onBackgroundClick={() => setSelectedNode(null)}
             />
 
-            {/* Side Panel (Details) */}
-            <div className={`absolute top-0 right-0 h-full w-80 bg-neo-white border-l-3 border-neo-black shadow-xl transform transition-transform duration-300 z-20 flex flex-col
-                            ${selectedNode ? 'translate-x-0' : 'translate-x-full'}`}>
+            {/* Side Panel (Details & Chat) */}
+            <div className={`absolute top-0 right-0 h-full w-80 bg-neo-white border-l-3 border-neo-black shadow-xl z-20 flex flex-col transition-transform duration-300 ${isPanelOpen ? 'translate-x-0' : 'translate-x-full'}`}>
 
-                {selectedNode ? (
-                    <>
-                        <div className="bg-neo-accent p-4 border-b-2 border-neo-black flex justify-between items-start">
+                {/* Toggle Button */}
+                <button
+                    onClick={() => setIsPanelOpen(!isPanelOpen)}
+                    className="absolute left-0 top-6 -translate-x-full bg-neo-white border-3 border-r-0 border-neo-black p-2 shadow-neo-sm flex items-center justify-center hover:bg-neo-accent transition-colors"
+                    title={isPanelOpen ? "Fermer le panneau" : "Ouvrir le panneau"}
+                >
+                    {isPanelOpen ? <ChevronRight size={20} /> : <ChevronLeft size={20} />}
+                </button>
+
+                {/* 1. Global / Entity Chat (Persistent) */}
+                <div className="flex-1 flex flex-col relative min-h-0" style={{ display: (!selectedNode || showChat) ? 'flex' : 'none' }}>
+                    <ChatInterface
+                        embedded={true}
+                        defaultScope={selectedNode ? 'ENTITY' : 'GLOBAL'}
+                        entityId={selectedNode?.id}
+                        entityName={selectedNode?.name}
+                        contextGraphIds={data.nodes.map((n: GraphNode) => n.id)}
+                        // If we are in "Explicit Connect" mode (showChat=true), show close button to go back to details
+                        // If we are in "Global Mode" (!selectedNode), no close button
+                        onClose={selectedNode ? () => setShowChat(false) : undefined}
+                        onRunCypher={onExecuteQuery}
+                    />
+                </div>
+
+                {/* 2. Node Details (Visible only if Node Selected AND Chat NOT explicitly requested) */}
+                {selectedNode && (
+                    <div className="flex flex-col h-full bg-neo-white" style={{ display: showChat ? 'none' : 'flex' }}>
+                        <div className="bg-neo-accent p-4 border-b-2 border-neo-black flex justify-between items-start shrink-0">
                             <div>
                                 <span className="inline-block px-2 py-0.5 text-[10px] font-black uppercase bg-neo-black text-neo-white mb-2 tracking-wider">
                                     {NODE_CONFIG[selectedNode.type]?.label || 'NOEUD'}
@@ -376,19 +386,23 @@ export function GraphViz({ initialData }: GraphVizProps) {
                                 </div>
                             )}
 
-                            <div className="mt-8 flex gap-2">
-                                <button className="flex-1 bg-neo-black text-neo-white py-2 px-3 text-xs font-bold uppercase flex items-center justify-center gap-2 hover:bg-neo-primary hover:text-neo-black transition-colors">
-                                    <Database size={14} /> Explorer
+                            <div className="mt-8 flex flex-col gap-2">
+                                <button
+                                    onClick={() => setShowChat(true)}
+                                    className="w-full bg-neo-black text-neo-white py-3 px-3 text-xs font-bold uppercase flex items-center justify-center gap-2 hover:bg-neo-primary hover:text-neo-black transition-colors shadow-neo-sm hover:shadow-none hover:translate-x-[1px] hover:translate-y-[1px]"
+                                >
+                                    <MessageSquare size={16} /> En discuter avec l'IA
                                 </button>
-                                <button className="flex-1 bg-white border border-neo-black text-neo-black py-2 px-3 text-xs font-bold uppercase flex items-center justify-center gap-2 hover:bg-neo-bg transition-colors">
-                                    <Share2 size={14} /> Partager
-                                </button>
+                                <div className="flex gap-2">
+                                    <button className="flex-1 bg-white border border-neo-black text-neo-black py-2 px-3 text-xs font-bold uppercase flex items-center justify-center gap-2 hover:bg-neo-bg transition-colors">
+                                        <Database size={14} /> Explorer
+                                    </button>
+                                    <button className="flex-1 bg-white border border-neo-black text-neo-black py-2 px-3 text-xs font-bold uppercase flex items-center justify-center gap-2 hover:bg-neo-bg transition-colors">
+                                        <Share2 size={14} /> Partager
+                                    </button>
+                                </div>
                             </div>
                         </div>
-                    </>
-                ) : (
-                    <div className="flex items-center justify-center h-full text-neo-black/30 font-bold uppercase">
-                        Aucune sélection
                     </div>
                 )}
             </div>

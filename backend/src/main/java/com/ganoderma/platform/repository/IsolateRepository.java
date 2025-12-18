@@ -8,4 +8,10 @@ import org.springframework.stereotype.Repository;
 public interface IsolateRepository extends Neo4jRepository<Isolate, Long> {
 
     Isolate findByName(String name);
+
+    java.util.List<Isolate> findByNameContainingIgnoreCase(String name);
+
+    java.util.List<Isolate> findByHostContainingIgnoreCase(String host);
+
+    java.util.List<Isolate> findByOriginCountryContainingIgnoreCase(String country);
 }
