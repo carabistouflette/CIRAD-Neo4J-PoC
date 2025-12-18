@@ -11,12 +11,21 @@ public class ChatDto {
     @Data
     @NoArgsConstructor
     @AllArgsConstructor
+    public static class MessageDto {
+        private String role;
+        private String content;
+    }
+
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
     public static class Request {
         private String message;
         private String model;
         private String scope; // "GLOBAL", "GRAPH", "ENTITY"
         private String entityId;
         private List<String> contextIds;
+        private List<MessageDto> history;
     }
 
     @Data

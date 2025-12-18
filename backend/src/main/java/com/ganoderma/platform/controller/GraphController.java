@@ -62,9 +62,9 @@ public class GraphController {
             // Determine Type (First label)
             String rawType = n.labels().iterator().hasNext() ? n.labels().iterator().next() : "Unknown";
             String type = rawType;
-            if ("Orthogroup".equals(rawType)) {
-                type = "Pathway"; // Visual proxy for Orthogroup
-            }
+            // if ("Orthogroup".equals(rawType)) {
+            // type = "Pathway"; // Visual proxy for Orthogroup
+            // }
 
             // ID Strategy: Use elementId (Internal Neo4j ID) to ensure consistency with
             // Relationships
@@ -87,6 +87,17 @@ public class GraphController {
             // Details
             Map<String, String> details = new HashMap<>();
             n.keys().forEach(k -> details.put(k, String.valueOf(n.get(k))));
+
+            // CRITICAL: Inject Logical ID for GraphRagService context Retrieval
+            String logicalId = id;
+            if (n.hasLabel("Isolate") && n.containsKey("name")) {
+                logicalId = "ISOLATE_" + n.get("name").asString();
+            } else if (n.hasLabel("Gene") && n.containsKey("geneId")) {
+                logicalId = "GENE_" + n.get("geneId").asString();
+            } else if (n.hasLabel("Orthogroup") && n.containsKey("groupId")) {
+                logicalId = "OG_" + n.get("groupId").asString();
+            }
+            details.put("logicalId", logicalId);
 
             // Visual Tweaks
             int valSize = type.equals("Isolate") ? 25 : type.equals("Gene") ? 15 : 20;
@@ -159,7 +170,7 @@ public class GraphController {
             nodes.add(GraphDto.NodeDto.builder()
                     .id(ogId)
                     .name(og.getGroupId())
-                    .type("Pathway") // Using Pathway as a proxy for OG visual style (Black Diamond)
+                    .type("Orthogroup") // Visual proxy for Orthogroup
                     .val(20)
                     .description("Orthologous Group with " + og.getGeneCount() + " genes")
                     .details(details)

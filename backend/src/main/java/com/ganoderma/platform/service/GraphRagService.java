@@ -11,6 +11,11 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.stereotype.Service;
 
+import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.SystemMessage;
+
 import java.util.List;
 import java.util.ArrayList;
 import java.util.Optional;
@@ -23,6 +28,7 @@ public class GraphRagService {
     private final ChatClient.Builder chatClientBuilder;
     private final GeneRepository geneRepository;
     private final IsolateRepository isolateRepository;
+    private final com.ganoderma.platform.repository.OrthogroupRepository orthogroupRepository;
 
     private static final String SYSTEM_PROMPT = """
             You are a strict bioinformatics assistant specializing in Ganoderma genomics.
@@ -58,35 +64,66 @@ public class GraphRagService {
         final String finalContextJson = contextJson != null ? contextJson : "";
         ChatClient chatClient = chatClientBuilder.build();
 
-        // 3. Intent Detection for Visualization (Only for GLOBAL/GRAPH scope)
+        // 3. Intent Detection for Visualization (Only for GLOBAL scope)
         String cypherQuery = null;
         String updatedContext = finalContextJson;
 
-        if (!"ENTITY".equals(scope)) {
+        if ("GLOBAL".equals(scope)) {
             String intent = detectIntent(userQuestion);
             if ("VISUALIZATION".equals(intent)) {
                 cypherQuery = generateCypher(userQuestion);
-
-                // CRITICAL: Inject context so the AI knows it succeeded, even if RAG found
-                // nothing textually.
-                String vizContext = " [SYSTEM EVENT]: The graph visualization has been successfully filtered/updated to show: '"
-                        + userQuestion + "'.";
-
-                if (updatedContext.contains("No specific entities found") || updatedContext.isEmpty()) {
-                    updatedContext = vizContext + " You should confirm this action to the user.";
-                } else {
-                    updatedContext += "\n" + vizContext;
+                if (cypherQuery != null) {
+                    updatedContext += "\n[SYSTEM: I am updating the graph based on your request. The user will see the new data shortly.]";
                 }
             }
         }
 
         final String activeContext = updatedContext;
 
+        // 4. Build Message History
+
+        List<Message> messages = new ArrayList<>();
+
+        // System Prompt first
+        messages.add(new SystemMessage(SYSTEM_PROMPT.replace("{context}", activeContext).replace("{scope}",
+                scope != null ? scope : "GLOBAL")));
+
+        // Append History if available
+        if (request.getHistory() != null) {
+            for (ChatDto.MessageDto msg : request.getHistory()) {
+                if ("user".equalsIgnoreCase(msg.getRole())) {
+                    // Prevent consecutive user messages (e.g. from retries after error)
+                    if (!messages.isEmpty() && messages.get(messages.size() - 1) instanceof UserMessage) {
+                        continue;
+                    }
+                    messages.add(new UserMessage(msg.getContent()));
+                } else if ("assistant".equalsIgnoreCase(msg.getRole())) {
+                    // Prevent consecutive assistant messages (rare but possible)
+                    if (!messages.isEmpty() && messages.get(messages.size() - 1) instanceof AssistantMessage) {
+                        continue;
+                    }
+                    // CRITICAL FIX: Assistant MUST follow a User message.
+                    // If the list only has SystemMessage (or ends with System/Assistant), skip this
+                    // Assistant message.
+                    if (messages.isEmpty() || !(messages.get(messages.size() - 1) instanceof UserMessage)) {
+                        continue;
+                    }
+                    messages.add(new AssistantMessage(msg.getContent()));
+                }
+            }
+        }
+
+        // Ensure the last message in history is NOT a UserMessage (because we are about
+        // to add one)
+        if (!messages.isEmpty() && messages.get(messages.size() - 1) instanceof UserMessage) {
+            messages.remove(messages.size() - 1);
+        }
+
+        // Add current user message
+        messages.add(new UserMessage(userQuestion));
+
         String aiResponse = chatClient.prompt()
-                .system(sp -> sp.text(SYSTEM_PROMPT)
-                        .param("context", activeContext)
-                        .param("scope", scope != null ? scope : "GLOBAL"))
-                .user(userQuestion)
+                .messages(messages)
                 .call()
                 .content();
 
@@ -98,13 +135,17 @@ public class GraphRagService {
     }
 
     private String retrieveGraphContext(List<String> contextIds) {
-        StringBuilder sb = new StringBuilder("Visible Graph Context:\n");
+        log.info("Retrieving Graph Context for {} IDs", contextIds != null ? contextIds.size() : 0);
+        if (contextIds == null || contextIds.isEmpty())
+            return "<GraphContext empty='true' />";
+
+        StringBuilder sb = new StringBuilder("<GraphContext item_count='" + contextIds.size() + "'>\n");
         int count = 0;
-        int maxItems = 15; // Limit to prevent Context Window overflow
+        int maxItems = 100;
 
         for (String id : contextIds) {
             if (count >= maxItems) {
-                sb.append(String.format("... and %d more items.", contextIds.size() - count));
+                sb.append("  <!-- Truncated " + (contextIds.size() - count) + " more items -->\n");
                 break;
             }
 
@@ -112,32 +153,53 @@ public class GraphRagService {
                 String name = id.substring("ISOLATE_".length());
                 Isolate iso = isolateRepository.findByName(name);
                 if (iso != null) {
-                    sb.append(String.format("- Isolate: %s (Country: %s, Host: %s)\n", iso.getName(),
-                            iso.getOriginCountry(), iso.getHost()));
-                    count++;
+                    sb.append(String.format("  <Node id='%s' type='Isolate'>\n", id));
+                    sb.append(String.format("    <Name>%s</Name>\n", iso.getName()));
+                    sb.append(String.format("    <Country>%s</Country>\n", iso.getOriginCountry()));
+                    sb.append(String.format("    <Host>%s</Host>\n", iso.getHost()));
+                    sb.append("  </Node>\n");
                 }
-            } else if (id.startsWith("GENE_")) {
-                String geneId = id.substring("GENE_".length());
+                count++;
+            } else if (id.startsWith("GENE_") || id.contains("Gbon")) {
+                String geneId = id.startsWith("GENE_") ? id.substring("GENE_".length()) : id;
                 Optional<Gene> geneOpt = geneRepository.findByGeneId(geneId);
                 if (geneOpt.isPresent()) {
                     Gene g = geneOpt.get();
-                    sb.append(String.format("- Gene: %s (Desc: %s)\n", g.getSymbol(), g.getDescription()));
-                    count++;
+                    String fullId = "GENE_" + g.getGeneId();
+                    sb.append(String.format("  <Node id='%s' type='Gene'>\n", fullId));
+                    sb.append(String.format("    <Symbol>%s</Symbol>\n", g.getSymbol()));
+                    sb.append(String.format("    <Description>%s</Description>\n",
+                            g.getDescription() != null ? g.getDescription().replace("<", "&lt;").replace(">", "&gt;")
+                                    : ""));
+
+                    // Topology / Relationships
+                    if (g.getIsolate() != null) {
+                        sb.append(String.format("    <Relation type='FOUND_IN' target='ISOLATE_%s'/>\n",
+                                g.getIsolate().getName()));
+                    }
+                    if (g.getOrthogroup() != null) {
+                        sb.append(String.format("    <Relation type='BELONGS_TO' target='OG_%s'/>\n",
+                                g.getOrthogroup().getGroupId()));
+                    }
+                    sb.append("  </Node>\n");
                 }
-            } else if (id.startsWith("OG_")) {
-                sb.append(String.format("- Orthogroup: %s\n", id.substring("OG_".length())));
+                count++;
+            } else if (id.startsWith("OG_") || id.startsWith("OG")) {
+                String ogId = id.startsWith("OG_") ? id.substring("OG_".length()) : id;
+                Optional<com.ganoderma.platform.model.Orthogroup> ogOpt = orthogroupRepository.findById(ogId);
+                if (ogOpt.isPresent()) {
+                    String fullId = "OG_" + ogOpt.get().getGroupId();
+                    sb.append(String.format("  <Node id='%s' type='Orthogroup'>\n", fullId));
+                    sb.append(String.format("    <GeneCount>%d</GeneCount>\n", ogOpt.get().getGeneCount()));
+                    sb.append("  </Node>\n");
+                }
                 count++;
             } else {
-                // FALLBACK: If ID doesn't have a prefix, it might be a raw internal ID or a
-                // name.
-                // Since we can't easily query by internal ID without Neo4jClient (which we can
-                // inject),
-                // we will append it as a generic node identifier for now.
-                // Ideally, we should inject Neo4jClient to fetch properties.
-                sb.append(String.format("- Unknown/Generic Entity ID: %s\n", id));
+                sb.append(String.format("  <Node id='%s' type='Unknown'/>\n", id));
                 count++;
             }
         }
+        sb.append("</GraphContext>");
         return sb.toString();
     }
 
