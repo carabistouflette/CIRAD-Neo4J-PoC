@@ -1,7 +1,7 @@
 import { useRef, useEffect, useState, useMemo } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
 import { Scan, RefreshCw, Search, X, Filter, Info, Share2, Database, ChevronDown, ChevronUp, MessageSquare, ChevronRight, ChevronLeft } from 'lucide-react';
-import { ChatInterface } from './ChatInterface';
+import { ChatInterface, type ReferenceNode } from './ChatInterface';
 
 // --- Types ---
 
@@ -186,6 +186,59 @@ export function GraphViz({ initialData, onExecuteQuery }: GraphVizProps) {
         });
     }, [visibleData.nodes]);
 
+    // Prepare Visible Nodes for Fuzzy Matching in Chat
+    const chatVisibleNodes: ReferenceNode[] = useMemo(() => {
+        return visibleData.nodes.map(node => ({
+            id: node.id,
+            name: node.name,
+            type: node.type
+        }));
+    }, [visibleData.nodes]);
+
+    // Handle Node Selection from Chat
+    const handleSelectNode = (nodeId: string) => {
+        const node = data.nodes.find(n => n.id === nodeId);
+        if (node && fgRef.current) {
+            // Ensure filters allow seeing this node
+            if (!activeFilters.includes(node.type)) {
+                setActiveFilters(prev => [...prev, node.type]);
+            }
+
+            fgRef.current.centerAt(node.x, node.y, 1000);
+            fgRef.current.zoom(5, 1000); // Zoom in
+            setSelectedNode(node);
+
+            // Optionally open panel if closed
+            if (!isPanelOpen) setIsPanelOpen(true);
+        }
+    };
+
+    // Handle Graph Load Request from Chat
+    const handleRequestLoadGraph = (request: string) => {
+        if (!onExecuteQuery) return;
+
+        // Parse Request: "Name depth=X"
+        // Heuristic parsing
+        const depthMatch = request.match(/depth=(\d+)/);
+        const depth = depthMatch ? parseInt(depthMatch[1]) : 2;
+        const namePart = request.replace(/depth=\d+/, '').trim();
+
+        console.log(`Loading Graph for: ${namePart} (depth: ${depth})`);
+
+        // Generate Cypher
+        // Case insensitive partial match for Name or Symbol
+        // We use optional relationships to catch Isolate-Gene-OG chains
+        const cypher = `
+            MATCH (n)
+            WHERE n.name CONTAINS '${namePart}' OR n.symbol CONTAINS '${namePart}'
+            WITH n LIMIT 1
+            MATCH p = (n)-[*1..${depth}]-(m)
+            RETURN p LIMIT 300
+        `;
+
+        onExecuteQuery(cypher);
+    };
+
     // Custom Node Rendering
     const drawNode = (node: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
         const config = NODE_CONFIG[node.type as NodeType] || { color: '#888', shape: 'circle' };
@@ -352,6 +405,9 @@ export function GraphViz({ initialData, onExecuteQuery }: GraphVizProps) {
                         entityId={selectedNode?.id}
                         entityName={selectedNode?.name}
                         contextGraphIds={contextGraphIds}
+                        visibleNodes={chatVisibleNodes} // Pass visible nodes for fuzzy finding
+                        onSelectNode={handleSelectNode} // Handle click on reference
+                        onRequestLoadGraph={handleRequestLoadGraph} // Handle "Load Graph" request
                         // If we are in "Explicit Connect" mode (showChat=true), show close button to go back to details
                         // If we are in "Global Mode" (!selectedNode), no close button
                         onClose={selectedNode ? () => setShowChat(false) : undefined}
@@ -419,4 +475,5 @@ export function GraphViz({ initialData, onExecuteQuery }: GraphVizProps) {
         </div>
     );
 }
+
 

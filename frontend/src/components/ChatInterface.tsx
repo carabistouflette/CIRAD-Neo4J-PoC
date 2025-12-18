@@ -1,30 +1,44 @@
 import { useState, useRef, useEffect } from 'react';
-import { Send, Bot, User, Sparkles, Trash2, Minus, Maximize2, Database, Network, Play, X, Edit2 } from 'lucide-react';
+import { Send, Bot, User, Sparkles, Trash2, Minus, Maximize2, Network, Play, X, ExternalLink, Search, Dna, Microscope, TestTube, Tag } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
+import Levenshtein from 'fast-levenshtein';
 
 interface Message {
     role: 'user' | 'assistant';
     content: string;
 }
 
+// Minimal Node type for fuzzy matching
+export interface ReferenceNode {
+    id: string;
+    name: string;
+    type: string;
+}
+
 interface ChatInterfaceProps {
     defaultScope?: 'GLOBAL' | 'ENTITY' | 'GRAPH';
     entityId?: string; // ID for backend retrieval (e.g. "ISOLATE_X")
     entityName?: string; // Display name
-    contextGraphIds?: string[]; // IDs of visible nodes for GRAPH scope
+    visibleNodes?: ReferenceNode[]; // Nodes currently in the graph for fuzzy matching
+    contextGraphIds?: string[]; // IDs for backend context
     embedded?: boolean; // If true, fills parent container, no floating window
     onClose?: () => void;
     onRunCypher?: (query: string) => void;
+    onSelectNode?: (nodeId: string) => void;
+    onRequestLoadGraph?: (searchTerm: string) => void;
 }
 
 export function ChatInterface({
     defaultScope = 'GLOBAL',
     entityId,
     entityName,
+    visibleNodes = [],
     contextGraphIds = [],
     embedded = false,
     onClose,
-    onRunCypher
+    onRunCypher,
+    onSelectNode,
+    onRequestLoadGraph
 }: ChatInterfaceProps) {
     const [messages, setMessages] = useState<Message[]>([
         {
@@ -47,6 +61,11 @@ export function ChatInterface({
 
     // Cypher Review State
     const [pendingCypher, setPendingCypher] = useState<string | null>(null);
+    const [refinementText, setRefinementText] = useState('');
+
+    // Node Not Found Modal State
+    const [missingNode, setMissingNode] = useState<{ name: string } | null>(null);
+    const [loadDepth, setLoadDepth] = useState(4);
 
     // Drag/Resize State
     const [isDragging, setIsDragging] = useState(false);
@@ -165,24 +184,29 @@ export function ChatInterface({
         ]);
     };
 
-    const sendMessage = async () => {
-        if (!input.trim()) return;
+    const sendMessage = async (overrideContent?: string, overrideHistory?: Message[]) => {
+        const contentToSend = overrideContent || input;
+        if (!contentToSend.trim()) return;
 
-        const userMsg = input;
-        setMessages(prev => [...prev, { role: 'user', content: userMsg }]);
-        setInput('');
+        if (!overrideContent) {
+            setMessages(prev => [...prev, { role: 'user', content: contentToSend }]);
+            setInput('');
+        }
+
         setIsLoading(true);
 
         try {
+            const historyToSend = overrideHistory || messages.map(m => ({ role: m.role, content: m.content }));
+
             const response = await fetch('http://localhost:8080/api/chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    message: userMsg,
-                    scope: scope,
-                    entityId: scope === 'ENTITY' ? entityId : undefined,
-                    contextIds: scope === 'GRAPH' ? contextGraphIds : undefined,
-                    history: messages.map(m => ({ role: m.role, content: m.content }))
+                    message: contentToSend,
+                    scope: 'GLOBAL', // Always use GLOBAL/Unified scope
+                    entityId: entityId, // Always pass available context
+                    contextIds: contextGraphIds,
+                    history: historyToSend
                 })
             });
 
@@ -197,6 +221,14 @@ export function ChatInterface({
                 console.log("AI intercepted graph update:", data.cypherQuery);
                 // Instead of auto-running, set it for review
                 setPendingCypher(data.cypherQuery);
+                setRefinementText(''); // Reset refinement input
+            } else if (pendingCypher && !data.cypherQuery) {
+                // If we were refining and got no new cypher, maybe the AI just answered simple text?
+                // Or maybe it cleared the cypher?
+                // Usually we expect a new cypher if we are in refinement loop, unless AI says "Okay I cancelled".
+                // But let's keep the panel open if we still have one, or simple logic:
+                // If no cypher returned, keep the old one? Or assume refinement failed/finished?
+                // Let's assume if we are refining, we want a new cypher.
             }
 
             setMessages(prev => [...prev, { role: 'assistant', content: data.answer }]);
@@ -216,9 +248,143 @@ export function ChatInterface({
         }
     };
 
+    const handleRefineCypher = () => {
+        if (!refinementText.trim() || !pendingCypher) return;
+
+        // Construct history with the pending cypher injected so AI knows what to refine
+        const historyWithContext: Message[] = [
+            ...messages,
+            { role: 'assistant', content: `[SYSTEM: Proposed Cypher for Review]\n${pendingCypher}` } // Inject as context
+        ];
+
+        // Add user refinement message visually too? 
+        // Yes, showing the refinement flow is good.
+        setMessages(prev => [...prev, { role: 'user', content: `Modification: ${refinementText}` }]);
+
+        // Send Refinement
+        sendMessage(refinementText, historyWithContext);
+    };
+
     const handleCancelCypher = () => {
         setPendingCypher(null);
         setMessages(prev => [...prev, { role: 'assistant', content: '❌ Requête annulée.' }]);
+    };
+
+    // --- Reference Link Handling ---
+
+    const handleReferenceClick = (refName: string) => {
+        // 1. Fuzzy Search in visibleNodes
+        if (!visibleNodes || visibleNodes.length === 0) {
+            // No graph data? Just propose load
+            setMissingNode({ name: refName });
+            return;
+        }
+
+        let bestMatch: ReferenceNode | null = null;
+        let bestDistance = Infinity;
+
+        // Threshold: Allow up to 2-3 edits for longer words, less for short
+        // Or simpler: Normalize and check contains
+        const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const target = normalize(refName);
+
+        // Exact substring match check first (often faster and better for "G. boninense")
+        const exactMatch = visibleNodes.find(n => normalize(n.name) === target);
+        if (exactMatch) {
+            onSelectNode?.(exactMatch.id);
+            return;
+        }
+
+        // Levenshtein Fallback
+        for (const node of visibleNodes) {
+            const dist = Levenshtein.get(refName.toLowerCase(), node.name.toLowerCase());
+            if (dist < bestDistance) {
+                bestDistance = dist;
+                bestMatch = node;
+            }
+        }
+
+        const maxDist = Math.max(2, Math.floor(refName.length * 0.3));
+
+        if (bestMatch && bestDistance <= maxDist) {
+            // Found!
+            console.log(`Fuzzy Match: '${refName}' -> '${bestMatch.name}' (dist: ${bestDistance})`);
+            onSelectNode?.(bestMatch.id);
+        } else {
+            // Not Found
+            console.log(`No match for '${refName}'. Best was '${bestMatch?.name}' (dist: ${bestDistance})`);
+            setMissingNode({ name: refName });
+        }
+    };
+
+    const getIconForEntity = (name: string) => {
+        // 1. Try to find in visible nodes to get strict type
+        const normalizedName = name.toLowerCase();
+        const node = visibleNodes?.find(n => n.name.toLowerCase() === normalizedName);
+        if (node) {
+            switch (node.type) {
+                case 'Gene': return <Dna size={10} className="inline text-neo-primary" />;
+                case 'Isolate': return <Microscope size={10} className="inline text-neo-primary" />;
+                case 'Sample': return <TestTube size={10} className="inline text-neo-primary" />;
+                case 'Orthogroup': return <Network size={10} className="inline text-neo-primary" />;
+                default: return <Tag size={10} className="inline text-neo-primary" />;
+            }
+        }
+
+        // 2. Fallback: Name Heuristics
+        if (name.startsWith('G.') || name.includes('boninense')) return <Microscope size={10} className="inline text-neo-primary" />;
+        if (name.startsWith('OG')) return <Network size={10} className="inline text-neo-primary" />;
+        if (name.startsWith('Gbon') || name.startsWith('Tox') || name.startsWith('Eff')) return <Dna size={10} className="inline text-neo-primary" />;
+
+        // 3. Default
+        return <Tag size={10} className="inline text-neo-primary" />;
+    };
+
+    const renderMessageContent = (content: string) => {
+        const parts = [];
+        let lastIndex = 0;
+        let match;
+
+        // Re-create regex for each render to avoid state issues
+        const regex = /<<([^>]+)>>/g;
+
+        while ((match = regex.exec(content)) !== null) {
+            // Text before match
+            if (match.index > lastIndex) {
+                parts.push(
+                    <ReactMarkdown key={`text-${lastIndex}`} components={{ p: 'span' }}>
+                        {content.substring(lastIndex, match.index)}
+                    </ReactMarkdown>
+                );
+            }
+
+            // The Reference
+            const refName = match[1];
+            parts.push(
+                <button
+                    key={`ref-${match.index}`}
+                    onClick={() => handleReferenceClick(refName)}
+                    className="inline-flex items-center gap-1 px-1 py-0.5 mx-0.5 bg-neo-accent/30 text-neo-black border border-neo-black/20 rounded hover:bg-neo-accent hover:border-neo-black transition-all text-xs font-bold cursor-pointer align-baseline"
+                    title="Cliquez pour voir dans le graphe"
+                >
+                    {getIconForEntity(refName)}
+                    {refName}
+                </button>
+            );
+
+            lastIndex = regex.lastIndex;
+        }
+
+        // Remaining text
+        if (lastIndex < content.length) {
+            parts.push(
+                <ReactMarkdown key={`text-${lastIndex}`} components={{ p: 'span' }}>
+                    {content.substring(lastIndex)}
+                </ReactMarkdown>
+            );
+        }
+
+        return <div className="leading-relaxed">{parts}</div>;
     };
 
     // Inner Content Component
@@ -235,31 +401,13 @@ export function ChatInterface({
                     </div>
                     <div>
                         <h2 className="font-black text-xs text-neo-black uppercase tracking-tight flex items-center gap-2">
-                            {scope === 'ENTITY' ? `Cible: ${entityName || '...'}` : (scope === 'GRAPH' ? 'Analyse Graphe' : 'Assistant Global')}
+                            {entityName ? `Contexte: ${entityName}` : 'Assistant Unifié'}
                         </h2>
                     </div>
                 </div>
 
                 <div className="flex items-center gap-1" onMouseDown={e => e.stopPropagation()}>
-                    {/* Scope Switcher (Only if not fixed to entity or want to allow switching back) */}
-                    <>
-                        <button
-                            onClick={() => setScope(scope === 'GLOBAL' ? 'ENTITY' : 'GLOBAL')}
-                            disabled={!entityId}
-                            className={`p-1 border-2 border-transparent hover:border-neo-black transition-colors ${scope === 'ENTITY' ? 'text-neo-primary' : 'text-neo-black'}`}
-                            title="Contexte Spécifique (Noeuds Sélectionné)"
-                        >
-                            <Database size={16} />
-                        </button>
-                        <button
-                            onClick={() => setScope(scope === 'GRAPH' ? 'GLOBAL' : 'GRAPH')}
-                            disabled={!contextGraphIds || contextGraphIds.length === 0}
-                            className={`p-1 border-2 border-transparent hover:border-neo-black transition-colors ${scope === 'GRAPH' ? 'text-neo-primary' : 'text-neo-black'}`}
-                            title="Contexte Graphe (Noeuds Visibles)"
-                        >
-                            <Network size={16} />
-                        </button>
-                    </>
+                    {/* Scope Switcher Removed - Context is now Automatic */}
 
                     {!embedded && (
                         <button
@@ -277,7 +425,7 @@ export function ChatInterface({
                             className="p-1 hover:bg-neo-black hover:text-white transition-colors border-2 border-transparent hover:border-neo-black"
                             title="Fermer"
                         >
-                            <Minus size={16} className="rotate-45" /> {/* Close Icon */}
+                            <Minus size={16} className="rotate-45" />
                         </button>
                     )}
 
@@ -309,9 +457,13 @@ export function ChatInterface({
                             ${msg.role === 'assistant'
                                 ? 'bg-neo-white text-neo-black'
                                 : 'bg-neo-black text-neo-white'}`}>
-                            <div className="prose prose-xs max-w-none">
-                                <ReactMarkdown>{msg.content}</ReactMarkdown>
-                            </div>
+                            {msg.role === 'assistant' ? (
+                                renderMessageContent(msg.content)
+                            ) : (
+                                <div className="prose prose-xs max-w-none">
+                                    <ReactMarkdown>{msg.content}</ReactMarkdown>
+                                </div>
+                            )}
                         </div>
                     </div>
                 ))}
@@ -331,7 +483,6 @@ export function ChatInterface({
                     </div>
                 )}
                 <div ref={messagesEndRef} />
-                <div ref={messagesEndRef} />
             </div>
 
             {/* Cypher Review Panel */}
@@ -342,21 +493,91 @@ export function ChatInterface({
                             <Sparkles size={12} /> Review Cypher Query
                         </span>
                         <div className="flex gap-1">
-                            <button onClick={handleRunCypher} className="p-1 bg-neo-black text-neo-accent hover:bg-neo-primary text-xs font-bold flex items-center gap-1">
-                                <Play size={12} /> Run
-                            </button>
-                            <button onClick={handleCancelCypher} className="p-1 bg-neo-white text-neo-black border-2 border-neo-black hover:bg-neo-bg text-xs font-bold">
+                            {/* Run Button is now primary action at bottom or beside text? 
+                                Let's keep it in header or separate? 
+                                User wants to *Refine* easily. */}
+                            <button onClick={handleCancelCypher} className="p-1 bg-neo-white text-neo-black border-2 border-neo-black hover:bg-neo-bg text-xs font-bold" title="Annuler">
                                 <X size={12} />
                             </button>
                         </div>
                     </div>
+
+                    {/* Editable Cypher */}
                     <textarea
                         className="w-full h-24 bg-neo-white border-2 border-neo-black p-2 text-xs font-mono resize-none focus:outline-none focus:shadow-neo"
                         value={pendingCypher}
                         onChange={(e) => setPendingCypher(e.target.value)}
                     />
+
+                    {/* Refinement Input */}
+                    <div className="flex gap-2">
+                        <input
+                            type="text"
+                            className="flex-1 bg-neo-white border-2 border-neo-black px-2 py-1 text-xs font-bold focus:shadow-neo focus:outline-none"
+                            placeholder="Affiner la requête (ex: 'Ajoute les gènes', 'Seulement Malaisie')..."
+                            value={refinementText}
+                            onChange={(e) => setRefinementText(e.target.value)}
+                            onKeyDown={(e) => e.key === 'Enter' && handleRefineCypher()}
+                        />
+                        <button
+                            onClick={handleRefineCypher}
+                            disabled={!refinementText.trim() || isLoading}
+                            className="bg-neo-white text-neo-black border-2 border-neo-black px-2 py-1 text-xs font-bold hover:bg-neo-accent transition-colors disabled:opacity-50"
+                        >
+                            <Sparkles size={12} className="inline mr-1" /> Modifier
+                        </button>
+                    </div>
+
+                    {/* Execute Button - Moved to bottom for clear flow */}
+                    <button
+                        onClick={handleRunCypher}
+                        className="w-full py-1.5 bg-neo-black text-neo-accent hover:bg-neo-primary hover:text-neo-black text-xs font-black uppercase flex items-center justify-center gap-2 transition-colors"
+                    >
+                        <Play size={14} /> Valider & Exécuter
+                    </button>
                 </div>
             )}
+
+            {/* Missing Node Modal (Inside Chat) */}
+            {
+                missingNode && (
+                    <div className="absolute bottom-16 left-4 right-4 bg-neo-white border-2 border-neo-black shadow-neo p-3 z-50 animate-in fade-in slide-in-from-bottom-2">
+                        <div className="flex justify-between items-start mb-2">
+                            <h3 className="text-xs font-black uppercase text-red-500 flex items-center gap-1">
+                                <Search size={12} /> Élement non trouvé
+                            </h3>
+                            <button onClick={() => setMissingNode(null)} className="hover:bg-neo-bg p-0.5 rounded">
+                                <X size={14} />
+                            </button>
+                        </div>
+                        <p className="text-sm font-bold mb-3">
+                            "{missingNode.name}" n'est pas visible dans le graphe actuel.
+                        </p>
+                        <div className="flex items-end gap-2">
+                            <div className="flex-1">
+                                <label className="text-[10px] font-bold uppercase block mb-1">Profondeur</label>
+                                <input
+                                    type="number"
+                                    min={1} max={10}
+                                    value={loadDepth}
+                                    onChange={(e) => setLoadDepth(parseInt(e.target.value))}
+                                    className="w-full border-2 border-neo-black px-2 py-1 text-sm font-bold bg-neo-bg"
+                                />
+                            </div>
+                            <button
+                                onClick={() => {
+                                    onRequestLoadGraph?.(`${missingNode.name} depth=${loadDepth}`);
+                                    setMessages(prev => [...prev, { role: 'assistant', content: `🔍 Chargement du graphe pour **${missingNode.name}** (Profondeur: ${loadDepth})...` }]);
+                                    setMissingNode(null);
+                                }}
+                                className="bg-neo-black text-neo-accent px-3 py-1.5 border-2 border-neo-black text-xs font-black uppercase hover:bg-neo-primary hover:text-neo-black transition-colors"
+                            >
+                                <ExternalLink size={14} className="inline mr-1" /> Charger
+                            </button>
+                        </div>
+                    </div>
+                )
+            }
 
             {/* Input Area */}
             <div className="p-3 bg-neo-white border-t-3 border-neo-black">
@@ -371,7 +592,7 @@ export function ChatInterface({
                         onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
                     />
                     <button
-                        onClick={sendMessage}
+                        onClick={() => sendMessage()}
                         disabled={isLoading || !input.trim()}
                         className="bg-neo-black text-neo-white border-2 border-neo-black px-3 py-2 hover:bg-neo-primary hover:text-neo-black hover:shadow-neo transition-all disabled:opacity-50 disabled:cursor-not-allowed active:translate-x-0.5 active:translate-y-0.5 active:shadow-none"
                     >
@@ -385,7 +606,7 @@ export function ChatInterface({
     // Render: Embedded Mode
     if (embedded) {
         return (
-            <div className="flex flex-col h-full w-full bg-neo-white border-t-3 border-neo-black"> {/* Added border-t for visual separation in panel */}
+            <div className="flex flex-col h-full w-full bg-neo-white border-t-3 border-neo-black relative"> {/* Added relative for modal positioning */}
                 {chatContent}
             </div>
         );
@@ -448,3 +669,4 @@ export function ChatInterface({
         </div>
     );
 }
+
