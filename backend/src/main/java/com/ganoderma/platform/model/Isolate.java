@@ -2,7 +2,6 @@ package com.ganoderma.platform.model;
 
 import org.springframework.data.neo4j.core.schema.Id;
 import org.springframework.data.neo4j.core.schema.Node;
-import org.springframework.data.neo4j.core.schema.Relationship;
 import org.springframework.data.neo4j.core.schema.GeneratedValue;
 import lombok.Data;
 import lombok.NoArgsConstructor;
@@ -24,8 +23,9 @@ public class Isolate {
     private String collectionDate;
 
     // Relations
-    @Relationship(type = "HAS_ASSEMBLY", direction = Relationship.Direction.OUTGOING)
-    private Assembly assembly;
+    // @Relationship(type = "HAS_ASSEMBLY", direction =
+    // Relationship.Direction.OUTGOING)
+    // private Assembly assembly;
 
     // Shortcuts for quick stats (optional, depends on depth)
     // @Relationship(type = "HAS_GENE", direction = Relationship.Direction.OUTGOING)
