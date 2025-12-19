@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState, useMemo } from 'react';
-import ForceGraph2D from 'react-force-graph-2d';
+import ForceGraph2D, { type ForceGraphMethods } from 'react-force-graph-2d';
 import { Scan, RefreshCw, Search, X, Filter, Info, Share2, Database, ChevronDown, ChevronUp, MessageSquare, ChevronRight, ChevronLeft } from 'lucide-react';
 import { ChatInterface, type ReferenceNode } from './ChatInterface';
 
@@ -24,7 +24,9 @@ interface GraphLink {
     source: string | GraphNode;
     target: string | GraphNode;
     label?: string;
+    value?: number; // Added for synthetic links
 }
+
 
 interface GraphData {
     nodes: GraphNode[];
@@ -49,26 +51,31 @@ interface GraphVizProps {
 }
 
 export function GraphViz({ initialData, onExecuteQuery }: GraphVizProps) {
-    const fgRef = useRef<any>(null);
+    const fgRef = useRef<ForceGraphMethods<GraphNode, GraphLink>>(undefined);
+
+
+
     const containerRef = useRef<HTMLDivElement>(null);
-    const data = initialData || { nodes: [], links: [] };
+    const data = useMemo(() => initialData || { nodes: [], links: [] }, [initialData]);
     const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
-    const [, setIsLoading] = useState(true);
+
 
     // UI State
     const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
     const [showChat, setShowChat] = useState(false);
+
+    // Helper to select node and reset chat
+    const selectNode = (node: GraphNode | null) => {
+        setSelectedNode(node);
+        setShowChat(false);
+    };
+
     const [isPanelOpen, setIsPanelOpen] = useState(true);
     const [searchQuery, setSearchQuery] = useState('');
     const [activeFilters, setActiveFilters] = useState<NodeType[]>(['Isolate', 'Sample', 'Orthogroup']); // 'Gene' hidden by default
     const [isFilterCollapsed, setIsFilterCollapsed] = useState(false); // Collapsible filters
 
-    // Fetch Data (Only if no initialData)
-    useEffect(() => {
-        if (initialData) {
-            setIsLoading(false);
-        }
-    }, [initialData]);
+
 
     // Responsive Sizing
     useEffect(() => {
@@ -99,10 +106,12 @@ export function GraphViz({ initialData, onExecuteQuery }: GraphVizProps) {
         const visibleNodeIds = new Set(visibleNodes.map(n => n.id));
 
         // 2. Links Logic
-        let visibleLinks: any[] = [];
+        let visibleLinks: GraphLink[] = [];
         const allLinks = data.links || [];
 
+
         if (showGenes) {
+
             // Standard View: Show all links connecting visible nodes
             visibleLinks = allLinks.filter(l => {
                 const sourceId = typeof l.source === 'object' ? (l.source as GraphNode).id : l.source;
@@ -160,22 +169,21 @@ export function GraphViz({ initialData, onExecuteQuery }: GraphVizProps) {
         return { nodes: visibleNodes, links: visibleLinks };
     }, [data, activeFilters]);
 
-    // Handle Search
-    useEffect(() => {
-        if (searchQuery && fgRef.current) {
-            const node = data.nodes.find(n => n.name.toLowerCase().includes(searchQuery.toLowerCase()));
-            if (node && node.x && node.y) {
+    // Handle Search via Event (To avoid setState in useEffect)
+    const handleSearch = (query: string) => {
+        setSearchQuery(query);
+        if (query && fgRef.current) {
+            const node = data.nodes.find(n => n.name.toLowerCase().includes(query.toLowerCase()));
+            if (node && node.x !== undefined && node.y !== undefined) {
                 fgRef.current.centerAt(node.x, node.y, 1000);
                 fgRef.current.zoom(6, 2000);
-                setSelectedNode(node);
+                selectNode(node);
             }
         }
-    }, [searchQuery, data]);
+    };
 
-    // Reset Chat when selection changes
-    useEffect(() => {
-        setShowChat(false);
-    }, [selectedNode]);
+
+
 
     // Data for Chat Context: Use logicalId if available (for Backend lookup)
     const contextGraphIds = useMemo(() => {
@@ -204,9 +212,9 @@ export function GraphViz({ initialData, onExecuteQuery }: GraphVizProps) {
                 setActiveFilters(prev => [...prev, node.type]);
             }
 
-            fgRef.current.centerAt(node.x, node.y, 1000);
+            fgRef.current.centerAt(node.x ?? 0, node.y ?? 0, 1000);
             fgRef.current.zoom(5, 1000); // Zoom in
-            setSelectedNode(node);
+            selectNode(node);
 
             // Optionally open panel if closed
             if (!isPanelOpen) setIsPanelOpen(true);
@@ -240,7 +248,7 @@ export function GraphViz({ initialData, onExecuteQuery }: GraphVizProps) {
     };
 
     // Custom Node Rendering
-    const drawNode = (node: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
+    const drawNode = (node: GraphNode, ctx: CanvasRenderingContext2D, globalScale: number) => {
         const config = NODE_CONFIG[node.type as NodeType] || { color: '#888', shape: 'circle' };
         const label = node.name;
         const size = node.val / 2;
@@ -249,23 +257,26 @@ export function GraphViz({ initialData, onExecuteQuery }: GraphVizProps) {
         ctx.strokeStyle = '#050505';
         ctx.lineWidth = 2 / globalScale; // Thinner border when zoomed out, but visible
 
+        const nx = node.x ?? 0;
+        const ny = node.y ?? 0;
+
         // Shape Logic
         ctx.beginPath();
         if (config.shape === 'square') {
-            ctx.rect(node.x - size, node.y - size, size * 2, size * 2);
+            ctx.rect(nx - size, ny - size, size * 2, size * 2);
         } else if (config.shape === 'triangle') {
-            ctx.moveTo(node.x, node.y - size);
-            ctx.lineTo(node.x - size, node.y + size);
-            ctx.lineTo(node.x + size, node.y + size);
+            ctx.moveTo(nx, ny - size);
+            ctx.lineTo(nx - size, ny + size);
+            ctx.lineTo(nx + size, ny + size);
             ctx.closePath();
         } else if (config.shape === 'diamond') {
-            ctx.moveTo(node.x, node.y - size);
-            ctx.lineTo(node.x + size, node.y);
-            ctx.lineTo(node.x, node.y + size);
-            ctx.lineTo(node.x - size, node.y);
+            ctx.moveTo(nx, ny - size);
+            ctx.lineTo(nx + size, ny);
+            ctx.lineTo(nx, ny + size);
+            ctx.lineTo(nx - size, ny);
             ctx.closePath();
         } else {
-            ctx.arc(node.x, node.y, size, 0, 2 * Math.PI, false);
+            ctx.arc(nx, ny, size, 0, 2 * Math.PI, false);
         }
 
         ctx.fill();
@@ -285,8 +296,9 @@ export function GraphViz({ initialData, onExecuteQuery }: GraphVizProps) {
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
             ctx.fillStyle = '#050505';
-            ctx.fillText(label, node.x, node.y + size + 2);
+            ctx.fillText(label, nx, ny + size + 2);
         }
+
     };
 
     return (
@@ -303,7 +315,7 @@ export function GraphViz({ initialData, onExecuteQuery }: GraphVizProps) {
                             className="bg-transparent border-none outline-none text-xs font-bold text-neo-black px-2 py-1 w-48"
                             placeholder="Rechercher un nœud..."
                             value={searchQuery}
-                            onChange={(e) => setSearchQuery(e.target.value)}
+                            onChange={(e) => handleSearch(e.target.value)}
                         />
                     </div>
 
@@ -347,7 +359,7 @@ export function GraphViz({ initialData, onExecuteQuery }: GraphVizProps) {
                     <button className="bg-neo-white p-2 border-2 border-neo-black shadow-neo-sm hover:shadow-none hover:translate-x-[1px] hover:translate-y-[1px] transition-all"
                         onClick={() => {
                             fgRef.current?.zoomToFit(500);
-                            setSelectedNode(null);
+                            selectNode(null);
                         }}
                         title="Réinitialiser la vue">
                         <Scan size={18} />
@@ -367,22 +379,25 @@ export function GraphViz({ initialData, onExecuteQuery }: GraphVizProps) {
                 height={dimensions.height}
                 graphData={visibleData}
                 nodeCanvasObject={drawNode} // Use custom drawing
-                nodePointerAreaPaint={(node: any, color, ctx) => {
+                nodePointerAreaPaint={(node: GraphNode, color, ctx) => {
                     const size = node.val / 2;
                     ctx.fillStyle = color;
                     ctx.beginPath();
-                    ctx.arc(node.x, node.y, size + 2, 0, 2 * Math.PI, false);
+                    ctx.arc(node.x ?? 0, node.y ?? 0, size + 2, 0, 2 * Math.PI, false);
                     ctx.fill();
                 }}
                 linkColor={() => '#050505'}
-                linkWidth={(link: any) => link.value ? Math.sqrt(link.value) + 1 : 1.5}
+                linkWidth={(link: GraphLink & { value?: number }) => link.value ? Math.sqrt(link.value) + 1 : 1.5}
                 backgroundColor="#FFFFFE"
                 onNodeClick={(node) => {
-                    setSelectedNode(node as GraphNode);
-                    fgRef.current?.centerAt(node.x, node.y, 1000);
-                    fgRef.current?.zoom(5, 1000);
+                    const gNode = node as GraphNode;
+                    selectNode(gNode);
+                    if (gNode.x !== undefined && gNode.y !== undefined) {
+                        fgRef.current?.centerAt(gNode.x, gNode.y, 1000);
+                        fgRef.current?.zoom(5, 1000);
+                    }
                 }}
-                onBackgroundClick={() => setSelectedNode(null)}
+                onBackgroundClick={() => selectNode(null)}
             />
 
             {/* Side Panel (Details & Chat) */}
@@ -425,7 +440,7 @@ export function GraphViz({ initialData, onExecuteQuery }: GraphVizProps) {
                                 </span>
                                 <h2 className="text-xl font-black leading-tight">{selectedNode.name}</h2>
                             </div>
-                            <button onClick={() => setSelectedNode(null)} className="hover:bg-neo-black hover:text-white rounded p-1 transition-colors">
+                            <button onClick={() => selectNode(null)} className="hover:bg-neo-black hover:text-white rounded p-1 transition-colors">
                                 <X size={20} />
                             </button>
                         </div>
